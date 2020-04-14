@@ -8,9 +8,8 @@ jobs:
     steps:
       - uses: TG908/fork-sync@v1.1
         with:
-          github_token: ${{ env.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           owner: goproxies
           base: master
           head: master
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          
