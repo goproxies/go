@@ -181,6 +181,7 @@ func init() {
 		fpgp        = regInfo{inputs: fponly, outputs: gponly}
 		gpfp        = regInfo{inputs: gponly, outputs: fponly}
 		fp11        = regInfo{inputs: fponly, outputs: fponly}
+		fp1flags    = regInfo{inputs: []regMask{fp}}
 		fp11clobber = regInfo{inputs: fponly, outputs: fponly}
 		fp2flags    = regInfo{inputs: []regMask{fp, fp}}
 
@@ -204,23 +205,23 @@ func init() {
 
 	var S390Xops = []opData{
 		// fp ops
-		{name: "FADDS", argLength: 2, reg: fp21clobber, asm: "FADDS", commutative: true, resultInArg0: true, clobberFlags: true}, // fp32 arg0 + arg1
-		{name: "FADD", argLength: 2, reg: fp21clobber, asm: "FADD", commutative: true, resultInArg0: true, clobberFlags: true},   // fp64 arg0 + arg1
-		{name: "FSUBS", argLength: 2, reg: fp21clobber, asm: "FSUBS", resultInArg0: true, clobberFlags: true},                    // fp32 arg0 - arg1
-		{name: "FSUB", argLength: 2, reg: fp21clobber, asm: "FSUB", resultInArg0: true, clobberFlags: true},                      // fp64 arg0 - arg1
-		{name: "FMULS", argLength: 2, reg: fp21, asm: "FMULS", commutative: true, resultInArg0: true},                            // fp32 arg0 * arg1
-		{name: "FMUL", argLength: 2, reg: fp21, asm: "FMUL", commutative: true, resultInArg0: true},                              // fp64 arg0 * arg1
-		{name: "FDIVS", argLength: 2, reg: fp21, asm: "FDIVS", resultInArg0: true},                                               // fp32 arg0 / arg1
-		{name: "FDIV", argLength: 2, reg: fp21, asm: "FDIV", resultInArg0: true},                                                 // fp64 arg0 / arg1
-		{name: "FNEGS", argLength: 1, reg: fp11clobber, asm: "FNEGS", clobberFlags: true},                                        // fp32 -arg0
-		{name: "FNEG", argLength: 1, reg: fp11clobber, asm: "FNEG", clobberFlags: true},                                          // fp64 -arg0
-		{name: "FMADDS", argLength: 3, reg: fp31, asm: "FMADDS", resultInArg0: true},                                             // fp32 arg1 * arg2 + arg0
-		{name: "FMADD", argLength: 3, reg: fp31, asm: "FMADD", resultInArg0: true},                                               // fp64 arg1 * arg2 + arg0
-		{name: "FMSUBS", argLength: 3, reg: fp31, asm: "FMSUBS", resultInArg0: true},                                             // fp32 arg1 * arg2 - arg0
-		{name: "FMSUB", argLength: 3, reg: fp31, asm: "FMSUB", resultInArg0: true},                                               // fp64 arg1 * arg2 - arg0
-		{name: "LPDFR", argLength: 1, reg: fp11, asm: "LPDFR"},                                                                   // fp64/fp32 set sign bit
-		{name: "LNDFR", argLength: 1, reg: fp11, asm: "LNDFR"},                                                                   // fp64/fp32 clear sign bit
-		{name: "CPSDR", argLength: 2, reg: fp21, asm: "CPSDR"},                                                                   // fp64/fp32 copy arg1 sign bit to arg0
+		{name: "FADDS", argLength: 2, reg: fp21clobber, typ: "(Float32,Flags)", asm: "FADDS", commutative: true, resultInArg0: true}, // fp32 arg0 + arg1
+		{name: "FADD", argLength: 2, reg: fp21clobber, typ: "(Float64,Flags)", asm: "FADD", commutative: true, resultInArg0: true},   // fp64 arg0 + arg1
+		{name: "FSUBS", argLength: 2, reg: fp21clobber, typ: "(Float32,Flags)", asm: "FSUBS", resultInArg0: true},                    // fp32 arg0 - arg1
+		{name: "FSUB", argLength: 2, reg: fp21clobber, typ: "(Float64,Flags)", asm: "FSUB", resultInArg0: true},                      // fp64 arg0 - arg1
+		{name: "FMULS", argLength: 2, reg: fp21, asm: "FMULS", commutative: true, resultInArg0: true},                                // fp32 arg0 * arg1
+		{name: "FMUL", argLength: 2, reg: fp21, asm: "FMUL", commutative: true, resultInArg0: true},                                  // fp64 arg0 * arg1
+		{name: "FDIVS", argLength: 2, reg: fp21, asm: "FDIVS", resultInArg0: true},                                                   // fp32 arg0 / arg1
+		{name: "FDIV", argLength: 2, reg: fp21, asm: "FDIV", resultInArg0: true},                                                     // fp64 arg0 / arg1
+		{name: "FNEGS", argLength: 1, reg: fp11clobber, asm: "FNEGS", clobberFlags: true},                                            // fp32 -arg0
+		{name: "FNEG", argLength: 1, reg: fp11clobber, asm: "FNEG", clobberFlags: true},                                              // fp64 -arg0
+		{name: "FMADDS", argLength: 3, reg: fp31, asm: "FMADDS", resultInArg0: true},                                                 // fp32 arg1 * arg2 + arg0
+		{name: "FMADD", argLength: 3, reg: fp31, asm: "FMADD", resultInArg0: true},                                                   // fp64 arg1 * arg2 + arg0
+		{name: "FMSUBS", argLength: 3, reg: fp31, asm: "FMSUBS", resultInArg0: true},                                                 // fp32 arg1 * arg2 - arg0
+		{name: "FMSUB", argLength: 3, reg: fp31, asm: "FMSUB", resultInArg0: true},                                                   // fp64 arg1 * arg2 - arg0
+		{name: "LPDFR", argLength: 1, reg: fp11, asm: "LPDFR"},                                                                       // fp64/fp32 set sign bit
+		{name: "LNDFR", argLength: 1, reg: fp11, asm: "LNDFR"},                                                                       // fp64/fp32 clear sign bit
+		{name: "CPSDR", argLength: 2, reg: fp21, asm: "CPSDR"},                                                                       // fp64/fp32 copy arg1 sign bit to arg0
 
 		// Round to integer, float64 only.
 		//
@@ -324,8 +325,10 @@ func init() {
 		{name: "CMPUconst", argLength: 1, reg: gp1flags, asm: "CMPU", typ: "Flags", aux: "Int32"},   // arg0 compare to auxint
 		{name: "CMPWUconst", argLength: 1, reg: gp1flags, asm: "CMPWU", typ: "Flags", aux: "Int32"}, // arg0 compare to auxint
 
-		{name: "FCMPS", argLength: 2, reg: fp2flags, asm: "CEBR", typ: "Flags"}, // arg0 compare to arg1, f32
-		{name: "FCMP", argLength: 2, reg: fp2flags, asm: "FCMPU", typ: "Flags"}, // arg0 compare to arg1, f64
+		{name: "FCMPS", argLength: 2, reg: fp2flags, asm: "CEBR", typ: "Flags"},  // arg0 compare to arg1, f32
+		{name: "FCMP", argLength: 2, reg: fp2flags, asm: "FCMPU", typ: "Flags"},  // arg0 compare to arg1, f64
+		{name: "LTDBR", argLength: 1, reg: fp1flags, asm: "LTDBR", typ: "Flags"}, // arg0 compare to 0, f64
+		{name: "LTEBR", argLength: 1, reg: fp1flags, asm: "LTEBR", typ: "Flags"}, // arg0 compare to 0, f32
 
 		{name: "SLD", argLength: 2, reg: sh21, asm: "SLD"},                   // arg0 << arg1, shift amount is mod 64
 		{name: "SLW", argLength: 2, reg: sh21, asm: "SLW"},                   // arg0 << arg1, shift amount is mod 32
@@ -627,6 +630,7 @@ func init() {
 			asm:            "STMG",
 			faultOnNilArg0: true,
 			symEffect:      "Write",
+			clobberFlags:   true, // TODO(mundaym): currently uses AGFI to handle large offsets
 		},
 		{
 			name:           "STMG3",
@@ -637,6 +641,7 @@ func init() {
 			asm:            "STMG",
 			faultOnNilArg0: true,
 			symEffect:      "Write",
+			clobberFlags:   true, // TODO(mundaym): currently uses AGFI to handle large offsets
 		},
 		{
 			name:      "STMG4",
@@ -654,6 +659,7 @@ func init() {
 			asm:            "STMG",
 			faultOnNilArg0: true,
 			symEffect:      "Write",
+			clobberFlags:   true, // TODO(mundaym): currently uses AGFI to handle large offsets
 		},
 		{
 			name:           "STM2",
@@ -664,6 +670,7 @@ func init() {
 			asm:            "STMY",
 			faultOnNilArg0: true,
 			symEffect:      "Write",
+			clobberFlags:   true, // TODO(mundaym): currently uses AGFI to handle large offsets
 		},
 		{
 			name:           "STM3",
@@ -674,6 +681,7 @@ func init() {
 			asm:            "STMY",
 			faultOnNilArg0: true,
 			symEffect:      "Write",
+			clobberFlags:   true, // TODO(mundaym): currently uses AGFI to handle large offsets
 		},
 		{
 			name:      "STM4",
@@ -691,6 +699,7 @@ func init() {
 			asm:            "STMY",
 			faultOnNilArg0: true,
 			symEffect:      "Write",
+			clobberFlags:   true, // TODO(mundaym): currently uses AGFI to handle large offsets
 		},
 
 		// large move

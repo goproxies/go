@@ -166,7 +166,9 @@ var pkgDeps = map[string][]string{
 		"internal/syscall/windows/registry",
 		"syscall",
 		"syscall/js",
+		"time/tzdata",
 	},
+	"time/tzdata": {"L0", "syscall"},
 
 	"internal/cfg":     {"L0"},
 	"internal/poll":    {"L0", "internal/oserror", "internal/race", "syscall", "time", "unicode/utf16", "unicode/utf8", "internal/syscall/windows", "internal/syscall/unix"},
@@ -199,7 +201,7 @@ var pkgDeps = map[string][]string{
 	"runtime/trace":  {"L0", "context", "fmt"},
 	"text/tabwriter": {"L2"},
 
-	"testing":                  {"L2", "flag", "fmt", "internal/race", "os", "runtime/debug", "runtime/pprof", "runtime/trace", "time"},
+	"testing":                  {"L2", "flag", "fmt", "internal/race", "io/ioutil", "os", "runtime/debug", "runtime/pprof", "runtime/trace", "time"},
 	"testing/iotest":           {"L2", "log"},
 	"testing/quick":            {"L2", "flag", "fmt", "reflect", "time"},
 	"internal/obscuretestdata": {"L2", "OS", "encoding/base64"},
@@ -517,7 +519,7 @@ func listStdPkgs(goroot string) ([]string, error) {
 }
 
 func TestDependencies(t *testing.T) {
-	iOS := runtime.GOOS == "darwin" && (runtime.GOARCH == "arm" || runtime.GOARCH == "arm64")
+	iOS := runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
 	if iOS {
 		// Tests run in a limited file system and we do not
 		// provide access to every source file.

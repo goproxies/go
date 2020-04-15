@@ -35,7 +35,8 @@ import (
 )
 
 // rule syntax:
-//  sexpr [&& extra conditions] -> [@block] sexpr
+//  sexpr [&& extra conditions] -> [@block] sexpr  (untyped)
+//  sexpr [&& extra conditions] => [@block] sexpr  (typed)
 //
 // sexpr are s-expressions (lisp-like parenthesized groupings)
 // sexpr ::= [variable:](opcode sexpr*)
@@ -74,11 +75,14 @@ func normalizeSpaces(s string) string {
 }
 
 // parse returns the matching part of the rule, additional conditions, and the result.
-func (r Rule) parse() (match, cond, result string) {
-	s := strings.Split(r.rule, "->")
-	if len(s) != 2 {
-		log.Fatalf("no arrow in %s", r)
+// parse also reports whether the generated code should use strongly typed aux and auxint fields.
+func (r Rule) parse() (match, cond, result string, typed bool) {
+	arrow := "->"
+	if strings.Contains(r.rule, "=>") {
+		arrow = "=>"
+		typed = true
 	}
+	s := strings.Split(r.rule, arrow)
 	match = normalizeSpaces(s[0])
 	result = normalizeSpaces(s[1])
 	cond = ""
@@ -86,7 +90,7 @@ func (r Rule) parse() (match, cond, result string) {
 		cond = normalizeSpaces(match[i+2:])
 		match = normalizeSpaces(match[:i])
 	}
-	return match, cond, result
+	return match, cond, result, typed
 }
 
 func genRules(arch arch)          { genRulesSuffix(arch, "") }
@@ -112,7 +116,7 @@ func genRulesSuffix(arch arch, suff string) {
 	scanner := bufio.NewScanner(text)
 	rule := ""
 	var lineno int
-	var ruleLineno int // line number of "->"
+	var ruleLineno int // line number of "->" or "=>"
 	for scanner.Scan() {
 		lineno++
 		line := scanner.Text()
@@ -126,13 +130,13 @@ func genRulesSuffix(arch arch, suff string) {
 		if rule == "" {
 			continue
 		}
-		if !strings.Contains(rule, "->") {
+		if !strings.Contains(rule, "->") && !strings.Contains(rule, "=>") {
 			continue
 		}
 		if ruleLineno == 0 {
 			ruleLineno = lineno
 		}
-		if strings.HasSuffix(rule, "->") {
+		if strings.HasSuffix(rule, "->") || strings.HasSuffix(rule, "=>") {
 			continue
 		}
 		if unbalanced(rule) {
@@ -147,7 +151,7 @@ func genRulesSuffix(arch arch, suff string) {
 				continue
 			}
 			// Do fancier value op matching.
-			match, _, _ := r.parse()
+			match, _, _, _ := r.parse()
 			op, oparch, _, _, _, _ := parseValue(match, arch, loc)
 			opname := fmt.Sprintf("Op%s%s", oparch, op.name)
 			oprules[opname] = append(oprules[opname], r)
@@ -177,6 +181,9 @@ func genRulesSuffix(arch arch, suff string) {
 	for _, op := range ops {
 		eop, ok := parseEllipsisRules(oprules[op], arch)
 		if ok {
+			if strings.Contains(oprules[op][0].rule, "=>") && opByName(arch, op).aux != opByName(arch, eop).aux {
+				panic(fmt.Sprintf("can't use ... for ops that have different aux types: %s and %s", op, eop))
+			}
 			swc := &Case{expr: exprf(op)}
 			swc.add(stmtf("v.Op = %s", eop))
 			swc.add(stmtf("return true"))
@@ -218,7 +225,7 @@ func genRulesSuffix(arch arch, suff string) {
 				log.Fatalf("unconditional rule %s is followed by other rules", rr.match)
 			}
 			rr = &RuleRewrite{loc: rule.loc}
-			rr.match, rr.cond, rr.result = rule.parse()
+			rr.match, rr.cond, rr.result, rr.typed = rule.parse()
 			pos, _ := genMatch(rr, arch, rr.match, fn.arglen >= 0)
 			if pos == "" {
 				pos = "v.Pos"
@@ -430,6 +437,8 @@ func (u *unusedInspector) node(node ast.Node) {
 		for _, stmt := range node.List {
 			u.node(stmt)
 		}
+	case *ast.DeclStmt:
+		u.node(node.Decl)
 	case *ast.IfStmt:
 		if node.Init != nil {
 			u.node(node.Init)
@@ -473,11 +482,15 @@ func (u *unusedInspector) node(node ast.Node) {
 			u.exprs(node.Lhs)
 			break
 		}
-		if len(node.Lhs) != 1 {
+		lhs := node.Lhs
+		if len(lhs) == 2 && lhs[1].(*ast.Ident).Name == "_" {
+			lhs = lhs[:1]
+		}
+		if len(lhs) != 1 {
 			panic("no support for := with multiple names")
 		}
 
-		name := node.Lhs[0].(*ast.Ident)
+		name := lhs[0].(*ast.Ident)
 		obj := &object{
 			name: name.Name,
 			pos:  name.NamePos,
@@ -524,6 +537,8 @@ func (u *unusedInspector) node(node ast.Node) {
 			}
 		}
 	case *ast.BasicLit:
+	case *ast.ValueSpec:
+		u.exprs(node.Values)
 	default:
 		panic(fmt.Sprintf("unhandled node: %T", node))
 	}
@@ -605,6 +620,16 @@ func fprint(w io.Writer, n Node) {
 		fmt.Fprintf(w, " {\n")
 		for _, n := range n.list {
 			fprint(w, n)
+		}
+		fmt.Fprintf(w, "}\n")
+	case *If:
+		fmt.Fprintf(w, "if ")
+		fprint(w, n.expr)
+		fmt.Fprintf(w, " {\n")
+		fprint(w, n.stmt)
+		if n.alt != nil {
+			fmt.Fprintf(w, "} else {\n")
+			fprint(w, n.alt)
 		}
 		fmt.Fprintf(w, "}\n")
 	case *Case:
@@ -713,8 +738,21 @@ func (w *bodyBase) add(node Statement) {
 	w.list = append(w.list, node)
 }
 
+// predeclared contains globally known tokens that should not be redefined.
+var predeclared = map[string]bool{
+	"nil":   true,
+	"false": true,
+	"true":  true,
+}
+
 // declared reports if the body contains a Declare with the given name.
 func (w *bodyBase) declared(name string) bool {
+	if predeclared[name] {
+		// Treat predeclared names as having already been declared.
+		// This lets us use nil to match an aux field or
+		// true and false to match an auxint field.
+		return true
+	}
 	for _, s := range w.list {
 		if decl, ok := s.(*Declare); ok && decl.name == name {
 			return true
@@ -741,6 +779,11 @@ type (
 		suffix string
 		arglen int32 // if kind == "Value", number of args for this op
 	}
+	If struct {
+		expr ast.Expr
+		stmt Statement
+		alt  Statement
+	}
 	Switch struct {
 		bodyBase // []*Case
 		expr     ast.Expr
@@ -757,11 +800,13 @@ type (
 		alloc        int    // for unique var names
 		loc          string // file name & line number of the original rule
 		commuteDepth int    // used to track depth of commute loops
+		typed        bool   // aux and auxint fields should be strongly typed
 	}
 	Declare struct {
 		name  string
 		value ast.Expr
 	}
+	// TODO: implement CondBreak as If + Break instead?
 	CondBreak struct {
 		expr              ast.Expr
 		insideCommuteLoop bool
@@ -810,7 +855,7 @@ func breakf(format string, a ...interface{}) *CondBreak {
 
 func genBlockRewrite(rule Rule, arch arch, data blockData) *RuleRewrite {
 	rr := &RuleRewrite{loc: rule.loc}
-	rr.match, rr.cond, rr.result = rule.parse()
+	rr.match, rr.cond, rr.result, rr.typed = rule.parse()
 	_, _, auxint, aux, s := extract(rr.match) // remove parens, then split
 
 	// check match of control values
@@ -967,20 +1012,46 @@ func genMatch0(rr *RuleRewrite, arch arch, match, v string, cnt map[string]int, 
 	}
 
 	for _, e := range []struct {
-		name, field string
+		name, field, dclType string
 	}{
-		{typ, "Type"},
-		{auxint, "AuxInt"},
-		{aux, "Aux"},
+		{typ, "Type", "*types.Type"},
+		{auxint, "AuxInt", op.auxIntType()},
+		{aux, "Aux", op.auxType()},
 	} {
 		if e.name == "" {
 			continue
 		}
+		if !rr.typed {
+			if !token.IsIdentifier(e.name) || rr.declared(e.name) {
+				// code or variable
+				rr.add(breakf("%s.%s != %s", v, e.field, e.name))
+			} else {
+				rr.add(declf(e.name, "%s.%s", v, e.field))
+			}
+			continue
+		}
+
+		if e.dclType == "" {
+			log.Fatalf("op %s has no declared type for %s", op.name, e.field)
+		}
 		if !token.IsIdentifier(e.name) || rr.declared(e.name) {
-			// code or variable
-			rr.add(breakf("%s.%s != %s", v, e.field, e.name))
+			switch e.field {
+			case "Aux":
+				rr.add(breakf("auxTo%s(%s.%s) != %s", title(e.dclType), v, e.field, e.name))
+			case "AuxInt":
+				rr.add(breakf("auxIntTo%s(%s.%s) != %s", title(e.dclType), v, e.field, e.name))
+			case "Type":
+				rr.add(breakf("%s.%s != %s", v, e.field, e.name))
+			}
 		} else {
-			rr.add(declf(e.name, "%s.%s", v, e.field))
+			switch e.field {
+			case "Aux":
+				rr.add(declf(e.name, "auxTo%s(%s.%s)", title(e.dclType), v, e.field))
+			case "AuxInt":
+				rr.add(declf(e.name, "auxIntTo%s(%s.%s)", title(e.dclType), v, e.field))
+			case "Type":
+				rr.add(declf(e.name, "%s.%s", v, e.field))
+			}
 		}
 	}
 
@@ -1141,10 +1212,20 @@ func genResult0(rr *RuleRewrite, arch arch, result string, top, move bool, pos s
 	}
 
 	if auxint != "" {
-		rr.add(stmtf("%s.AuxInt = %s", v, auxint))
+		if rr.typed {
+			// Make sure auxint value has the right type.
+			rr.add(stmtf("%s.AuxInt = %sToAuxInt(%s)", v, unTitle(op.auxIntType()), auxint))
+		} else {
+			rr.add(stmtf("%s.AuxInt = %s", v, auxint))
+		}
 	}
 	if aux != "" {
-		rr.add(stmtf("%s.Aux = %s", v, aux))
+		if rr.typed {
+			// Make sure aux value has the right type.
+			rr.add(stmtf("%s.Aux = %sToAux(%s)", v, unTitle(op.auxType()), aux))
+		} else {
+			rr.add(stmtf("%s.Aux = %s", v, aux))
+		}
 	}
 	all := new(strings.Builder)
 	for i, arg := range args {
@@ -1413,7 +1494,7 @@ func excludeFromExpansion(s string, idx []int) bool {
 		return true
 	}
 	right := s[idx[1]:]
-	if strings.Contains(left, "&&") && strings.Contains(right, "->") {
+	if strings.Contains(left, "&&") && (strings.Contains(right, "->") || strings.Contains(right, "=>")) {
 		// Inside && conditions.
 		return true
 	}
@@ -1516,6 +1597,7 @@ func normalizeWhitespace(x string) string {
 	x = strings.Replace(x, "[ ", "[", -1)
 	x = strings.Replace(x, " ]", "]", -1)
 	x = strings.Replace(x, ")->", ") ->", -1)
+	x = strings.Replace(x, ")=>", ") =>", -1)
 	return x
 }
 
@@ -1571,7 +1653,7 @@ func parseEllipsisRules(rules []Rule, arch arch) (newop string, ok bool) {
 		return "", false
 	}
 	rule := rules[0]
-	match, cond, result := rule.parse()
+	match, cond, result, _ := rule.parse()
 	if cond != "" || !isEllipsisValue(match) || !isEllipsisValue(result) {
 		if strings.Contains(rule.rule, "...") {
 			log.Fatalf("%s: found ellipsis in non-ellipsis rule", rule.loc)
@@ -1596,7 +1678,7 @@ func isEllipsisValue(s string) bool {
 }
 
 func checkEllipsisRuleCandidate(rule Rule, arch arch) {
-	match, cond, result := rule.parse()
+	match, cond, result, _ := rule.parse()
 	if cond != "" {
 		return
 	}
@@ -1604,15 +1686,19 @@ func checkEllipsisRuleCandidate(rule Rule, arch arch) {
 	var auxint2, aux2 string
 	var args2 []string
 	var usingCopy string
+	var eop opData
 	if result[0] != '(' {
 		// Check for (Foo x) -> x, which can be converted to (Foo ...) -> (Copy ...).
 		args2 = []string{result}
 		usingCopy = " using Copy"
 	} else {
-		_, _, _, auxint2, aux2, args2 = parseValue(result, arch, rule.loc)
+		eop, _, _, auxint2, aux2, args2 = parseValue(result, arch, rule.loc)
 	}
 	// Check that all restrictions in match are reproduced exactly in result.
 	if aux != aux2 || auxint != auxint2 || len(args) != len(args2) {
+		return
+	}
+	if strings.Contains(rule.rule, "=>") && op.aux != eop.aux {
 		return
 	}
 	for i := range args {
@@ -1647,4 +1733,71 @@ func opByName(arch arch, name string) opData {
 	}
 	log.Fatalf("failed to find op named %s in arch %s", name, arch.name)
 	panic("unreachable")
+}
+
+// auxType returns the Go type that this operation should store in its aux field.
+func (op opData) auxType() string {
+	switch op.aux {
+	case "String":
+		return "string"
+	case "Sym":
+		// Note: a Sym can be an *obj.LSym, a *gc.Node, or nil.
+		return "Sym"
+	case "SymOff":
+		return "Sym"
+	case "SymValAndOff":
+		return "Sym"
+	case "Typ":
+		return "*types.Type"
+	case "TypSize":
+		return "*types.Type"
+	default:
+		return "invalid"
+	}
+}
+
+// auxIntType returns the Go type that this operation should store in its auxInt field.
+func (op opData) auxIntType() string {
+	switch op.aux {
+	case "Bool":
+		return "bool"
+	case "Int8":
+		return "int8"
+	case "Int16":
+		return "int16"
+	case "Int32":
+		return "int32"
+	case "Int64":
+		return "int64"
+	case "Int128":
+		return "int128"
+	case "Float32":
+		return "float32"
+	case "Float64":
+		return "float64"
+	case "SymOff":
+		return "int32"
+	case "SymValAndOff":
+		return "ValAndOff"
+	case "TypSize":
+		return "int64"
+	case "CCop":
+		return "Op"
+	default:
+		return "invalid"
+	}
+}
+
+func title(s string) string {
+	if i := strings.Index(s, "."); i >= 0 {
+		s = s[i+1:]
+	}
+	return strings.Title(s)
+}
+
+func unTitle(s string) string {
+	if i := strings.Index(s, "."); i >= 0 {
+		s = s[i+1:]
+	}
+	return strings.ToLower(s[:1]) + s[1:]
 }
