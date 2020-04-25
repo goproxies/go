@@ -7,6 +7,7 @@ package ld
 import (
 	"cmd/internal/sys"
 	"cmd/link/internal/loader"
+	"cmd/link/internal/sym"
 )
 
 // This file contains utilities to decode type.* symbols, for
@@ -16,7 +17,7 @@ import (
 // to decodesym.go once the rouetines there have been decprecated + removed.
 
 func decodeReloc2(ldr *loader.Loader, symIdx loader.Sym, relocs *loader.Relocs, off int32) loader.Reloc2 {
-	for j := 0; j < relocs.Count; j++ {
+	for j := 0; j < relocs.Count(); j++ {
 		rel := relocs.At2(j)
 		if rel.Off() == off {
 			return rel
@@ -117,4 +118,57 @@ func decodetypeStructFieldOffsAnon2(ldr *loader.Loader, arch *sys.Arch, symIdx l
 	off := decodetypeStructFieldArrayOff2(ldr, arch, symIdx, i)
 	data := ldr.Data(symIdx)
 	return int64(decodeInuxi(arch, data[off+2*arch.PtrSize:], arch.PtrSize))
+}
+
+// decodetypeStr2 returns the contents of an rtype's str field (a nameOff).
+func decodetypeStr2(ldr *loader.Loader, arch *sys.Arch, symIdx loader.Sym) string {
+	relocs := ldr.Relocs(symIdx)
+	str := decodetypeName2(ldr, symIdx, &relocs, 4*arch.PtrSize+8)
+	data := ldr.Data(symIdx)
+	if data[2*arch.PtrSize+4]&tflagExtraStar != 0 {
+		return str[1:]
+	}
+	return str
+}
+
+func decodetypeGcmask2(ctxt *Link, s loader.Sym) []byte {
+	if ctxt.loader.SymType(s) == sym.SDYNIMPORT {
+		symData := ctxt.loader.Data(s)
+		addr := decodetypeGcprogShlib(ctxt, symData)
+		ptrdata := decodetypePtrdata(ctxt.Arch, symData)
+		sect := findShlibSection(ctxt, ctxt.loader.SymPkg(s), addr)
+		if sect != nil {
+			r := make([]byte, ptrdata/int64(ctxt.Arch.PtrSize))
+			sect.ReadAt(r, int64(addr-sect.Addr))
+			return r
+		}
+		Exitf("cannot find gcmask for %s", ctxt.loader.SymName(s))
+		return nil
+	}
+	relocs := ctxt.loader.Relocs(s)
+	mask := decodeRelocSym2(ctxt.loader, s, &relocs, 2*int32(ctxt.Arch.PtrSize)+8+1*int32(ctxt.Arch.PtrSize))
+	return ctxt.loader.Data(mask)
+}
+
+// Type.commonType.gc
+func decodetypeGcprog2(ctxt *Link, s loader.Sym) []byte {
+	if ctxt.loader.SymType(s) == sym.SDYNIMPORT {
+		symData := ctxt.loader.Data(s)
+		addr := decodetypeGcprogShlib(ctxt, symData)
+		sect := findShlibSection(ctxt, ctxt.loader.SymPkg(s), addr)
+		if sect != nil {
+			// A gcprog is a 4-byte uint32 indicating length, followed by
+			// the actual program.
+			progsize := make([]byte, 4)
+			sect.ReadAt(progsize, int64(addr-sect.Addr))
+			progbytes := make([]byte, ctxt.Arch.ByteOrder.Uint32(progsize))
+			sect.ReadAt(progbytes, int64(addr-sect.Addr+4))
+			return append(progsize, progbytes...)
+		}
+		Exitf("cannot find gcmask for %s", ctxt.loader.SymName(s))
+		return nil
+	}
+	relocs := ctxt.loader.Relocs(s)
+	rs := decodeRelocSym2(ctxt.loader, s, &relocs, 2*int32(ctxt.Arch.PtrSize)+8+1*int32(ctxt.Arch.PtrSize))
+	return ctxt.loader.Data(rs)
 }

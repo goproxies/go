@@ -298,12 +298,6 @@
 (Leq32U x y) -> (LessEqualU (CMPW x y))
 (Leq64U x y) -> (LessEqualU (CMP x y))
 
-(Greater32F x y) -> (GreaterThanF (FCMPS x y))
-(Greater64F x y) -> (GreaterThanF (FCMPD x y))
-
-(Geq32F x y) -> (GreaterEqualF (FCMPS x y))
-(Geq64F x y) -> (GreaterEqualF (FCMPD x y))
-
 // Optimize comparison between a floating-point value and 0.0 with "FCMP $(0.0), Fn"
 (FCMPS x (FMOVSconst [0])) -> (FCMPS0 x)
 (FCMPS (FMOVSconst [0]) x) -> (InvertFlags (FCMPS0 x))
@@ -470,12 +464,12 @@
 // medium move uses a duff device
 (Move [s] dst src mem)
 	&& s > 32 && s <= 16*64 && s%16 == 8
-	&& !config.noDuffDevice ->
+	&& !config.noDuffDevice && logLargeCopy(v, s) ->
 	(MOVDstore [s-8] dst (MOVDload [s-8] src mem)
 		(DUFFCOPY <types.TypeMem> [8*(64-(s-8)/16)] dst src mem))
 (Move [s] dst src mem)
 	&& s > 32 && s <= 16*64 && s%16 == 0
-	&& !config.noDuffDevice ->
+	&& !config.noDuffDevice && logLargeCopy(v, s) ->
 	(DUFFCOPY [8 * (64 - s/16)] dst src mem)
 // 8 is the number of bytes to encode:
 //
@@ -486,7 +480,7 @@
 
 // large move uses a loop
 (Move [s] dst src mem)
-	&& s > 24 && s%8 == 0 ->
+	&& s > 24 && s%8 == 0 && logLargeCopy(v, s) ->
 	(LoweredMove
 		dst
 		src
@@ -678,14 +672,14 @@
 (GT (CMPWconst [0] z:(MSUBW a x y)) yes no) && z.Uses==1 -> (GT (CMPW a (MULW <x.Type> x y)) yes no)
 
 // Absorb bit-tests into block
-(Z  (ANDconst [c] x) yes no) && oneBit(c) -> (TBZ  {ntz(c)} x yes no)
-(NZ (ANDconst [c] x) yes no) && oneBit(c) -> (TBNZ {ntz(c)} x yes no)
-(ZW  (ANDconst [c] x) yes no) && oneBit(int64(uint32(c))) -> (TBZ  {ntz(int64(uint32(c)))} x yes no)
-(NZW (ANDconst [c] x) yes no) && oneBit(int64(uint32(c))) -> (TBNZ {ntz(int64(uint32(c)))} x yes no)
-(EQ (TSTconst [c] x) yes no) && oneBit(c) -> (TBZ  {ntz(c)} x yes no)
-(NE (TSTconst [c] x) yes no) && oneBit(c) -> (TBNZ {ntz(c)} x yes no)
-(EQ (TSTWconst [c] x) yes no) && oneBit(int64(uint32(c))) -> (TBZ  {ntz(int64(uint32(c)))} x yes no)
-(NE (TSTWconst [c] x) yes no) && oneBit(int64(uint32(c))) -> (TBNZ {ntz(int64(uint32(c)))} x yes no)
+(Z  (ANDconst [c] x) yes no) && oneBit(c) -> (TBZ  {int64(ntz64(c))} x yes no)
+(NZ (ANDconst [c] x) yes no) && oneBit(c) -> (TBNZ {int64(ntz64(c))} x yes no)
+(ZW  (ANDconst [c] x) yes no) && oneBit(int64(uint32(c))) -> (TBZ  {int64(ntz64(int64(uint32(c))))} x yes no)
+(NZW (ANDconst [c] x) yes no) && oneBit(int64(uint32(c))) -> (TBNZ {int64(ntz64(int64(uint32(c))))} x yes no)
+(EQ (TSTconst [c] x) yes no) && oneBit(c) -> (TBZ  {int64(ntz64(c))} x yes no)
+(NE (TSTconst [c] x) yes no) && oneBit(c) -> (TBNZ {int64(ntz64(c))} x yes no)
+(EQ (TSTWconst [c] x) yes no) && oneBit(int64(uint32(c))) -> (TBZ  {int64(ntz64(int64(uint32(c))))} x yes no)
+(NE (TSTWconst [c] x) yes no) && oneBit(int64(uint32(c))) -> (TBNZ {int64(ntz64(int64(uint32(c))))} x yes no)
 
 // Test sign-bit for signed comparisons against zero
 (GE (CMPWconst [0] x) yes no) -> (TBZ  {int64(31)} x yes no)

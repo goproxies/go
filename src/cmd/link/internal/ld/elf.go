@@ -628,9 +628,9 @@ func elfwriteshdrs(out *OutBuf) uint32 {
 	return uint32(ehdr.shnum) * ELF32SHDRSIZE
 }
 
-func elfsetstring(s *sym.Symbol, str string, off int) {
+func elfsetstring2(ctxt *Link, s loader.Sym, str string, off int) {
 	if nelfstr >= len(elfstr) {
-		Errorf(s, "too many elf strings")
+		ctxt.Errorf(s, "too many elf strings")
 		errorexit()
 	}
 
@@ -753,8 +753,8 @@ func elfWriteDynEnt(arch *sys.Arch, s *sym.Symbol, tag int, val uint64) {
 	}
 }
 
-func elfWriteDynEntSym(arch *sys.Arch, s *sym.Symbol, tag int, t *sym.Symbol) {
-	Elfwritedynentsymplus(arch, s, tag, t, 0)
+func elfWriteDynEntSym2(ctxt *Link, s *loader.SymbolBuilder, tag int, t loader.Sym) {
+	Elfwritedynentsymplus2(ctxt, s, tag, t, 0)
 }
 
 func Elfwritedynentsymplus(arch *sys.Arch, s *sym.Symbol, tag int, t *sym.Symbol, add int64) {
@@ -776,13 +776,13 @@ func elfWriteDynEntSymSize(arch *sys.Arch, s *sym.Symbol, tag int, t *sym.Symbol
 }
 
 // temporary
-func Elfwritedynent2(ctxt *Link, s *loader.SymbolBuilder, tag int, val uint64) {
+func Elfwritedynent2(arch *sys.Arch, s *loader.SymbolBuilder, tag int, val uint64) {
 	if elf64 {
-		s.AddUint64(ctxt.Arch, uint64(tag))
-		s.AddUint64(ctxt.Arch, val)
+		s.AddUint64(arch, uint64(tag))
+		s.AddUint64(arch, val)
 	} else {
-		s.AddUint32(ctxt.Arch, uint32(tag))
-		s.AddUint32(ctxt.Arch, uint32(val))
+		s.AddUint32(arch, uint32(tag))
+		s.AddUint32(arch, uint32(val))
 	}
 }
 
@@ -880,6 +880,25 @@ func elfwritenetbsdsig(out *OutBuf) int {
 	out.Write8(0)
 	out.Write32(ELF_NOTE_NETBSD_VERSION)
 
+	return int(sh.size)
+}
+
+// The race detector can't handle ASLR (address space layout randomization).
+// ASLR is on by default for NetBSD, so we turn the ASLR off explicitly
+// using a magic elf Note when building race binaries.
+
+func elfnetbsdpax(sh *ElfShdr, startva uint64, resoff uint64) int {
+	n := int(Rnd(4, 4) + Rnd(4, 4))
+	return elfnote(sh, startva, resoff, n)
+}
+
+func elfwritenetbsdpax(out *OutBuf) int {
+	sh := elfwritenotehdr(out, ".note.netbsd.pax", 4 /* length of PaX\x00 */, 4 /* length of flags */, 0x03 /* PaX type */)
+	if sh == nil {
+		return 0
+	}
+	out.Write([]byte("PaX\x00"))
+	out.Write32(0x20) // 0x20 = Force disable ASLR
 	return int(sh.size)
 }
 
@@ -1038,15 +1057,16 @@ havelib:
 	return aux
 }
 
-func elfdynhash(ctxt *Link) {
+func elfdynhash2(ctxt *Link) {
 	if !ctxt.IsELF {
 		return
 	}
 
 	nsym := Nelfsym
-	s := ctxt.Syms.Lookup(".hash", 0)
-	s.Type = sym.SELFROSECT
-	s.Attr |= sym.AttrReachable
+	ldr := ctxt.loader
+	s := ldr.CreateSymForUpdate(".hash", 0)
+	s.SetType(sym.SELFROSECT)
+	s.SetReachable(true)
 
 	i := nsym
 	nbucket := 1
@@ -1060,21 +1080,19 @@ func elfdynhash(ctxt *Link) {
 	chain := make([]uint32, nsym)
 	buckets := make([]uint32, nbucket)
 
-	for _, sy := range ctxt.Syms.Allsym {
-		if sy.Dynid <= 0 {
-			continue
+	for _, sy := range ldr.DynidSyms() {
+
+		dynid := ldr.SymDynid(sy)
+		if ldr.SymDynimpvers(sy) != "" {
+			need[dynid] = addelflib(&needlib, ldr.SymDynimplib(sy), ldr.SymDynimpvers(sy))
 		}
 
-		if sy.Dynimpvers() != "" {
-			need[sy.Dynid] = addelflib(&needlib, sy.Dynimplib(), sy.Dynimpvers())
-		}
-
-		name := sy.Extname()
+		name := ldr.SymExtname(sy)
 		hc := elfhash(name)
 
 		b := hc % uint32(nbucket)
-		chain[sy.Dynid] = buckets[b]
-		buckets[b] = uint32(sy.Dynid)
+		chain[dynid] = buckets[b]
+		buckets[b] = uint32(dynid)
 	}
 
 	// s390x (ELF64) hash table entries are 8 bytes
@@ -1098,10 +1116,11 @@ func elfdynhash(ctxt *Link) {
 		}
 	}
 
-	// version symbols
-	dynstr := ctxt.Syms.Lookup(".dynstr", 0)
+	dynstr := ldr.CreateSymForUpdate(".dynstr", 0)
 
-	s = ctxt.Syms.Lookup(".gnu.version_r", 0)
+	// version symbols
+	gnuVersionR := ldr.CreateSymForUpdate(".gnu.version_r", 0)
+	s = gnuVersionR
 	i = 2
 	nfile := 0
 	for l := needlib; l != nil; l = l.next {
@@ -1113,9 +1132,9 @@ func elfdynhash(ctxt *Link) {
 		for x := l.aux; x != nil; x = x.next {
 			j++
 		}
-		s.AddUint16(ctxt.Arch, uint16(j))                         // aux count
-		s.AddUint32(ctxt.Arch, uint32(Addstring(dynstr, l.file))) // file string offset
-		s.AddUint32(ctxt.Arch, 16)                                // offset from header to first aux
+		s.AddUint16(ctxt.Arch, uint16(j))                        // aux count
+		s.AddUint32(ctxt.Arch, uint32(dynstr.Addstring(l.file))) // file string offset
+		s.AddUint32(ctxt.Arch, 16)                               // offset from header to first aux
 		if l.next != nil {
 			s.AddUint32(ctxt.Arch, 16+uint32(j)*16) // offset from this header to next
 		} else {
@@ -1127,10 +1146,10 @@ func elfdynhash(ctxt *Link) {
 			i++
 
 			// aux struct
-			s.AddUint32(ctxt.Arch, elfhash(x.vers))                   // hash
-			s.AddUint16(ctxt.Arch, 0)                                 // flags
-			s.AddUint16(ctxt.Arch, uint16(x.num))                     // other - index we refer to this by
-			s.AddUint32(ctxt.Arch, uint32(Addstring(dynstr, x.vers))) // version string offset
+			s.AddUint32(ctxt.Arch, elfhash(x.vers))                  // hash
+			s.AddUint16(ctxt.Arch, 0)                                // flags
+			s.AddUint16(ctxt.Arch, uint16(x.num))                    // other - index we refer to this by
+			s.AddUint32(ctxt.Arch, uint32(dynstr.Addstring(x.vers))) // version string offset
 			if x.next != nil {
 				s.AddUint32(ctxt.Arch, 16) // offset from this aux to next
 			} else {
@@ -1140,7 +1159,8 @@ func elfdynhash(ctxt *Link) {
 	}
 
 	// version references
-	s = ctxt.Syms.Lookup(".gnu.version", 0)
+	gnuVersion := ldr.CreateSymForUpdate(".gnu.version", 0)
+	s = gnuVersion
 
 	for i := 0; i < nsym; i++ {
 		if i == 0 {
@@ -1152,26 +1172,26 @@ func elfdynhash(ctxt *Link) {
 		}
 	}
 
-	s = ctxt.Syms.Lookup(".dynamic", 0)
+	s = ldr.CreateSymForUpdate(".dynamic", 0)
 	elfverneed = nfile
 	if elfverneed != 0 {
-		elfWriteDynEntSym(ctxt.Arch, s, DT_VERNEED, ctxt.Syms.Lookup(".gnu.version_r", 0))
-		elfWriteDynEnt(ctxt.Arch, s, DT_VERNEEDNUM, uint64(nfile))
-		elfWriteDynEntSym(ctxt.Arch, s, DT_VERSYM, ctxt.Syms.Lookup(".gnu.version", 0))
+		elfWriteDynEntSym2(ctxt, s, DT_VERNEED, gnuVersionR.Sym())
+		Elfwritedynent2(ctxt.Arch, s, DT_VERNEEDNUM, uint64(nfile))
+		elfWriteDynEntSym2(ctxt, s, DT_VERSYM, gnuVersion.Sym())
 	}
 
-	sy := ctxt.Syms.Lookup(elfRelType+".plt", 0)
-	if sy.Size > 0 {
+	sy := ldr.CreateSymForUpdate(elfRelType+".plt", 0)
+	if sy.Size() > 0 {
 		if elfRelType == ".rela" {
-			elfWriteDynEnt(ctxt.Arch, s, DT_PLTREL, DT_RELA)
+			Elfwritedynent2(ctxt.Arch, s, DT_PLTREL, DT_RELA)
 		} else {
-			elfWriteDynEnt(ctxt.Arch, s, DT_PLTREL, DT_REL)
+			Elfwritedynent2(ctxt.Arch, s, DT_PLTREL, DT_REL)
 		}
-		elfWriteDynEntSymSize(ctxt.Arch, s, DT_PLTRELSZ, sy)
-		elfWriteDynEntSym(ctxt.Arch, s, DT_JMPREL, sy)
+		elfwritedynentsymsize2(ctxt, s, DT_PLTRELSZ, sy.Sym())
+		elfWriteDynEntSym2(ctxt, s, DT_JMPREL, sy.Sym())
 	}
 
-	elfWriteDynEnt(ctxt.Arch, s, DT_NULL, 0)
+	Elfwritedynent2(ctxt.Arch, s, DT_NULL, 0)
 }
 
 func elfphload(seg *sym.Segment) *ElfPhdr {
@@ -1415,21 +1435,27 @@ func Elfemitreloc(ctxt *Link) {
 		if sect.Name == ".text" {
 			elfrelocsect(ctxt, sect, ctxt.Textp)
 		} else {
-			elfrelocsect(ctxt, sect, datap)
+			elfrelocsect(ctxt, sect, ctxt.datap)
 		}
 	}
 
 	for _, sect := range Segrodata.Sections {
-		elfrelocsect(ctxt, sect, datap)
+		elfrelocsect(ctxt, sect, ctxt.datap)
 	}
 	for _, sect := range Segrelrodata.Sections {
-		elfrelocsect(ctxt, sect, datap)
+		elfrelocsect(ctxt, sect, ctxt.datap)
 	}
 	for _, sect := range Segdata.Sections {
-		elfrelocsect(ctxt, sect, datap)
+		elfrelocsect(ctxt, sect, ctxt.datap)
 	}
-	for _, sect := range Segdwarf.Sections {
-		elfrelocsect(ctxt, sect, dwarfp)
+	for i := 0; i < len(Segdwarf.Sections); i++ {
+		sect := Segdwarf.Sections[i]
+		si := dwarfp[i]
+		if si.secSym() != sect.Sym ||
+			si.secSym().Sect != sect {
+			panic("inconsistency between dwarfp and Segdwarf")
+		}
+		elfrelocsect(ctxt, sect, si.syms)
 	}
 }
 
@@ -1484,6 +1510,9 @@ func (ctxt *Link) doelf() {
 	}
 	if ctxt.IsNetbsd() {
 		shstrtab.Addstring(".note.netbsd.ident")
+		if *flagRace {
+			shstrtab.Addstring(".note.netbsd.pax")
+		}
 	}
 	if ctxt.IsOpenbsd() {
 		shstrtab.Addstring(".note.openbsd.ident")
@@ -1658,9 +1687,9 @@ func (ctxt *Link) doelf() {
 
 		elfwritedynentsym2(ctxt, dynamic, DT_SYMTAB, dynsym.Sym())
 		if elf64 {
-			Elfwritedynent2(ctxt, dynamic, DT_SYMENT, ELF64SYMSIZE)
+			Elfwritedynent2(ctxt.Arch, dynamic, DT_SYMENT, ELF64SYMSIZE)
 		} else {
-			Elfwritedynent2(ctxt, dynamic, DT_SYMENT, ELF32SYMSIZE)
+			Elfwritedynent2(ctxt.Arch, dynamic, DT_SYMENT, ELF32SYMSIZE)
 		}
 		elfwritedynentsym2(ctxt, dynamic, DT_STRTAB, dynstr.Sym())
 		elfwritedynentsymsize2(ctxt, dynamic, DT_STRSZ, dynstr.Sym())
@@ -1668,16 +1697,16 @@ func (ctxt *Link) doelf() {
 			rela := ldr.LookupOrCreateSym(".rela", 0)
 			elfwritedynentsym2(ctxt, dynamic, DT_RELA, rela)
 			elfwritedynentsymsize2(ctxt, dynamic, DT_RELASZ, rela)
-			Elfwritedynent2(ctxt, dynamic, DT_RELAENT, ELF64RELASIZE)
+			Elfwritedynent2(ctxt.Arch, dynamic, DT_RELAENT, ELF64RELASIZE)
 		} else {
 			rel := ldr.LookupOrCreateSym(".rel", 0)
 			elfwritedynentsym2(ctxt, dynamic, DT_REL, rel)
 			elfwritedynentsymsize2(ctxt, dynamic, DT_RELSZ, rel)
-			Elfwritedynent2(ctxt, dynamic, DT_RELENT, ELF32RELSIZE)
+			Elfwritedynent2(ctxt.Arch, dynamic, DT_RELENT, ELF32RELSIZE)
 		}
 
 		if rpath.val != "" {
-			Elfwritedynent2(ctxt, dynamic, DT_RUNPATH, uint64(dynstr.Addstring(rpath.val)))
+			Elfwritedynent2(ctxt.Arch, dynamic, DT_RUNPATH, uint64(dynstr.Addstring(rpath.val)))
 		}
 
 		if ctxt.IsPPC64() {
@@ -1687,14 +1716,14 @@ func (ctxt *Link) doelf() {
 		}
 
 		if ctxt.IsPPC64() {
-			Elfwritedynent2(ctxt, dynamic, DT_PPC64_OPT, 0)
+			Elfwritedynent2(ctxt.Arch, dynamic, DT_PPC64_OPT, 0)
 		}
 
 		// Solaris dynamic linker can't handle an empty .rela.plt if
 		// DT_JMPREL is emitted so we have to defer generation of DT_PLTREL,
 		// DT_PLTRELSZ, and DT_JMPREL dynamic entries until after we know the
 		// size of .rel(a).plt section.
-		Elfwritedynent2(ctxt, dynamic, DT_DEBUG, 0)
+		Elfwritedynent2(ctxt.Arch, dynamic, DT_DEBUG, 0)
 	}
 
 	if ctxt.IsShared() {
@@ -1821,6 +1850,14 @@ func Asmbelf(ctxt *Link, symo int64) {
 
 	var pph *ElfPhdr
 	var pnote *ElfPhdr
+	if *flagRace && ctxt.IsNetbsd() {
+		sh := elfshname(".note.netbsd.pax")
+		resoff -= int64(elfnetbsdpax(sh, uint64(startva), uint64(resoff)))
+		pnote = newElfPhdr()
+		pnote.type_ = PT_NOTE
+		pnote.flags = PF_R
+		phsh(pnote, sh)
+	}
 	if ctxt.LinkMode == LinkExternal {
 		/* skip program headers */
 		eh.phoff = 0
@@ -2200,10 +2237,9 @@ elfobj:
 		for _, sect := range Segdata.Sections {
 			elfshreloc(ctxt.Arch, sect)
 		}
-		for _, s := range dwarfp {
-			if len(s.R) > 0 || s.Type == sym.SDWARFINFO || s.Type == sym.SDWARFLOC {
-				elfshreloc(ctxt.Arch, s.Sect)
-			}
+		for _, si := range dwarfp {
+			s := si.secSym()
+			elfshreloc(ctxt.Arch, s.Sect)
 		}
 		// add a .note.GNU-stack section to mark the stack as non-executable
 		sh := elfshname(".note.GNU-stack")
@@ -2298,6 +2334,9 @@ elfobj:
 			a += int64(elfwritegobuildid(ctxt.Out))
 		}
 	}
+	if *flagRace && ctxt.IsNetbsd() {
+		a += int64(elfwritenetbsdpax(ctxt.Out))
+	}
 
 	if a > elfreserve {
 		Errorf(nil, "ELFRESERVE too small: %d > %d with %d text sections", a, elfreserve, numtext)
@@ -2384,6 +2423,92 @@ func elfadddynsym(target *Target, syms *ArchSyms, s *sym.Symbol) {
 
 		/* shndx */
 		if s.Type == sym.SDYNIMPORT {
+			d.AddUint16(target.Arch, SHN_UNDEF)
+		} else {
+			d.AddUint16(target.Arch, 1)
+		}
+	}
+}
+
+func elfadddynsym2(ldr *loader.Loader, target *Target, syms *ArchSyms, s loader.Sym) {
+	ldr.SetSymDynid(s, int32(Nelfsym))
+	Nelfsym++
+	d := ldr.MakeSymbolUpdater(syms.DynSym2)
+	name := ldr.SymExtname(s)
+	dstru := ldr.MakeSymbolUpdater(syms.DynStr2)
+	st := ldr.SymType(s)
+	cgoeStatic := ldr.AttrCgoExportStatic(s)
+	cgoeDynamic := ldr.AttrCgoExportDynamic(s)
+	cgoexp := (cgoeStatic || cgoeDynamic)
+
+	d.AddUint32(target.Arch, uint32(dstru.Addstring(name)))
+
+	if elf64 {
+
+		/* type */
+		t := STB_GLOBAL << 4
+
+		if cgoexp && st == sym.STEXT {
+			t |= STT_FUNC
+		} else {
+			t |= STT_OBJECT
+		}
+		d.AddUint8(uint8(t))
+
+		/* reserved */
+		d.AddUint8(0)
+
+		/* section where symbol is defined */
+		if st == sym.SDYNIMPORT {
+			d.AddUint16(target.Arch, SHN_UNDEF)
+		} else {
+			d.AddUint16(target.Arch, 1)
+		}
+
+		/* value */
+		if st == sym.SDYNIMPORT {
+			d.AddUint64(target.Arch, 0)
+		} else {
+			d.AddAddrPlus(target.Arch, s, 0)
+		}
+
+		/* size of object */
+		d.AddUint64(target.Arch, uint64(len(ldr.Data(s))))
+
+		dil := ldr.SymDynimplib(s)
+
+		if target.Arch.Family == sys.AMD64 && !cgoeDynamic && dil != "" && !seenlib[dil] {
+			du := ldr.MakeSymbolUpdater(syms.Dynamic2)
+			Elfwritedynent2(target.Arch, du, DT_NEEDED, uint64(dstru.Addstring(dil)))
+		}
+	} else {
+
+		/* value */
+		if st == sym.SDYNIMPORT {
+			d.AddUint32(target.Arch, 0)
+		} else {
+			d.AddAddrPlus(target.Arch, s, 0)
+		}
+
+		/* size of object */
+		d.AddUint32(target.Arch, uint32(len(ldr.Data(s))))
+
+		/* type */
+		t := STB_GLOBAL << 4
+
+		// TODO(mwhudson): presumably the behavior should actually be the same on both arm and 386.
+		if target.Arch.Family == sys.I386 && cgoexp && st == sym.STEXT {
+			t |= STT_FUNC
+		} else if target.Arch.Family == sys.ARM && cgoeDynamic && st == sym.STEXT {
+			t |= STT_FUNC
+		} else {
+			t |= STT_OBJECT
+		}
+		d.AddUint8(uint8(t))
+		d.AddUint8(0)
+
+		/* shndx */
+		if st == sym.SDYNIMPORT {
 			d.AddUint16(target.Arch, SHN_UNDEF)
 		} else {
 			d.AddUint16(target.Arch, 1)

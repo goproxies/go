@@ -5,6 +5,7 @@ package ld
 
 import (
 	"cmd/internal/obj"
+	"cmd/link/internal/loader"
 	"cmd/link/internal/sym"
 	"sync"
 )
@@ -15,13 +16,16 @@ type unresolvedSymKey struct {
 }
 
 type lookupFn func(name string, version int) *sym.Symbol
+type symNameFn func(s loader.Sym) string
 
 // ErrorReporter is used to make error reporting thread safe.
 type ErrorReporter struct {
+	loader.ErrorReporter
 	unresOnce  sync.Once
 	unresSyms  map[unresolvedSymKey]bool
 	unresMutex sync.Mutex
 	lookup     lookupFn
+	SymName    symNameFn
 }
 
 // errorUnresolved prints unresolved symbol error for r.Sym that is referenced from s.
@@ -44,7 +48,7 @@ func (reporter *ErrorReporter) errorUnresolved(s *sym.Symbol, r *sym.Reloc) {
 				if v == -1 {
 					continue
 				}
-				if rs := reporter.lookup(r.Sym.Name, v); rs != nil && rs.Type != sym.Sxxx {
+				if rs := reporter.lookup(r.Sym.Name, v); rs != nil && rs.Type != sym.Sxxx && rs.Type != sym.SXREF {
 					haveABI = abi
 				}
 			}

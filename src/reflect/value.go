@@ -177,6 +177,17 @@ func methodName() string {
 	return f.Name()
 }
 
+// methodNameSkip is like methodName, but skips another stack frame.
+// This is a separate function so that reflect.flag.mustBe will be inlined.
+func methodNameSkip() string {
+	pc, _, _, _ := runtime.Caller(3)
+	f := runtime.FuncForPC(pc)
+	if f == nil {
+		return "unknown method"
+	}
+	return f.Name()
+}
+
 // emptyInterface is the header for an interface{} value.
 type emptyInterface struct {
 	typ  *rtype
@@ -219,10 +230,10 @@ func (f flag) mustBeExported() {
 
 func (f flag) mustBeExportedSlow() {
 	if f == 0 {
-		panic(&ValueError{methodName(), Invalid})
+		panic(&ValueError{methodNameSkip(), Invalid})
 	}
 	if f&flagRO != 0 {
-		panic("reflect: " + methodName() + " using value obtained using unexported field")
+		panic("reflect: " + methodNameSkip() + " using value obtained using unexported field")
 	}
 }
 
@@ -237,14 +248,14 @@ func (f flag) mustBeAssignable() {
 
 func (f flag) mustBeAssignableSlow() {
 	if f == 0 {
-		panic(&ValueError{methodName(), Invalid})
+		panic(&ValueError{methodNameSkip(), Invalid})
 	}
 	// Assignable if addressable and not read-only.
 	if f&flagRO != 0 {
-		panic("reflect: " + methodName() + " using value obtained using unexported field")
+		panic("reflect: " + methodNameSkip() + " using value obtained using unexported field")
 	}
 	if f&flagAddr == 0 {
-		panic("reflect: " + methodName() + " using unaddressable value")
+		panic("reflect: " + methodNameSkip() + " using unaddressable value")
 	}
 }
 
@@ -1304,7 +1315,7 @@ func (v Value) Method(i int) Value {
 	if v.typ.Kind() == Interface && v.IsNil() {
 		panic("reflect: Method on nil interface value")
 	}
-	fl := v.flag & (flagStickyRO | flagIndir) // Clear flagEmbedRO
+	fl := v.flag.ro() | (v.flag & flagIndir)
 	fl |= flag(Func)
 	fl |= flag(i)<<flagMethodShift | flagMethod
 	return Value{v.typ, v.ptr, fl}
@@ -2541,6 +2552,14 @@ func makeFloat(f flag, v float64, t Type) Value {
 	return Value{typ, ptr, f | flagIndir | flag(typ.Kind())}
 }
 
+// makeFloat returns a Value of type t equal to v, where t is a float32 type.
+func makeFloat32(f flag, v float32, t Type) Value {
+	typ := t.common()
+	ptr := unsafe_New(typ)
+	*(*float32)(ptr) = v
+	return Value{typ, ptr, f | flagIndir | flag(typ.Kind())}
+}
+
 // makeComplex returns a Value of type t equal to v (possibly truncated to complex64),
 // where t is a complex64 or complex128 type.
 func makeComplex(f flag, v complex128, t Type) Value {
@@ -2613,6 +2632,12 @@ func cvtUintFloat(v Value, t Type) Value {
 
 // convertOp: floatXX -> floatXX
 func cvtFloat(v Value, t Type) Value {
+	if v.Type().Kind() == Float32 && t.Kind() == Float32 {
+		// Don't do any conversion if both types have underlying type float32.
+		// This avoids converting to float64 and back, which will
+		// convert a signaling NaN to a quiet NaN. See issue 36400.
+		return makeFloat32(v.flag.ro(), *(*float32)(v.ptr), t)
+	}
 	return makeFloat(v.flag.ro(), v.Float(), t)
 }
 

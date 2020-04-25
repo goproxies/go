@@ -32,13 +32,14 @@ package ld
 
 import (
 	"bufio"
+	"cmd/internal/goobj2"
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
 	"cmd/link/internal/benchmark"
-	"cmd/link/internal/sym"
 	"flag"
 	"log"
 	"os"
+	"os/exec"
 	"runtime"
 	"runtime/pprof"
 	"strings"
@@ -74,7 +75,7 @@ var (
 	flagExtldflags = flag.String("extldflags", "", "pass `flags` to external linker")
 	flagExtar      = flag.String("extar", "", "archive program for buildmode=c-archive")
 
-	flagA           = flag.Bool("a", false, "disassemble output")
+	flagA           = flag.Bool("a", false, "no-op (deprecated)")
 	FlagC           = flag.Bool("c", false, "dump call graph")
 	FlagD           = flag.Bool("d", false, "disable dynamic executable")
 	flagF           = flag.Bool("f", false, "ignore version mismatch")
@@ -95,9 +96,12 @@ var (
 	cpuprofile     = flag.String("cpuprofile", "", "write cpu profile to `file`")
 	memprofile     = flag.String("memprofile", "", "write memory profile to `file`")
 	memprofilerate = flag.Int64("memprofilerate", 0, "set runtime.MemProfileRate to `rate`")
+	flagnewDoData  = flag.Bool("newdodata", true, "New style dodata")
 
 	benchmarkFlag     = flag.String("benchmark", "", "set to 'mem' or 'cpu' to enable phase benchmarking")
-	benchmarkFileFlag = flag.String("benchmarkprofile", "", "set to enable per-phase pprof profiling")
+	benchmarkFileFlag = flag.String("benchmarkprofile", "", "emit phase profiles to `base`_phase.{cpu,mem}prof")
+
+	flagGo115Newobj = flag.Bool("go115newobj", true, "use new object file format")
 )
 
 // Main is the main entry point for the linker code.
@@ -137,6 +141,10 @@ func Main(arch *sys.Arch, theArch Arch) {
 
 	objabi.Flagparse(usage)
 
+	if !*flagGo115Newobj {
+		oldlink()
+	}
+
 	switch *flagHeadType {
 	case "":
 	case "windowsgui":
@@ -148,10 +156,10 @@ func Main(arch *sys.Arch, theArch Arch) {
 			usage()
 		}
 	}
-
-	if objabi.Fieldtrack_enabled != 0 {
-		ctxt.Reachparent = make(map[*sym.Symbol]*sym.Symbol)
+	if ctxt.HeadType == objabi.Hunknown {
+		ctxt.HeadType.Set(objabi.GOOS)
 	}
+
 	checkStrictDups = *FlagStrictDups
 
 	startProfile()
@@ -187,15 +195,18 @@ func Main(arch *sys.Arch, theArch Arch) {
 
 	bench.Start("libinit")
 	libinit(ctxt) // creates outfile
-
-	if ctxt.HeadType == objabi.Hunknown {
-		ctxt.HeadType.Set(objabi.GOOS)
-	}
-
 	bench.Start("computeTLSOffset")
 	ctxt.computeTLSOffset()
 	bench.Start("Archinit")
 	thearch.Archinit(ctxt)
+
+	if *flagnewDoData {
+		// New dodata() is currently only implemented for selected targets.
+		if !(ctxt.IsElf() &&
+			(ctxt.IsAMD64() || ctxt.Is386())) {
+			*flagnewDoData = false
+		}
+	}
 
 	if ctxt.linkShared && !ctxt.IsELF {
 		Exitf("-linkshared can only be used on elf systems")
@@ -205,6 +216,7 @@ func Main(arch *sys.Arch, theArch Arch) {
 		ctxt.Logf("HEADER = -H%d -T0x%x -R0x%x\n", ctxt.HeadType, uint64(*FlagTextAddr), uint32(*FlagRound))
 	}
 
+	zerofp := goobj2.FingerprintType{}
 	switch ctxt.BuildMode {
 	case BuildModeShared:
 		for i := 0; i < flag.NArg(); i++ {
@@ -218,12 +230,12 @@ func Main(arch *sys.Arch, theArch Arch) {
 			}
 			pkglistfornote = append(pkglistfornote, pkgpath...)
 			pkglistfornote = append(pkglistfornote, '\n')
-			addlibpath(ctxt, "command line", "command line", file, pkgpath, "")
+			addlibpath(ctxt, "command line", "command line", file, pkgpath, "", zerofp)
 		}
 	case BuildModePlugin:
-		addlibpath(ctxt, "command line", "command line", flag.Arg(0), *flagPluginPath, "")
+		addlibpath(ctxt, "command line", "command line", flag.Arg(0), *flagPluginPath, "", zerofp)
 	default:
-		addlibpath(ctxt, "command line", "command line", flag.Arg(0), "main", "")
+		addlibpath(ctxt, "command line", "command line", flag.Arg(0), "main", "", zerofp)
 	}
 	bench.Start("loadlib")
 	ctxt.loadlib()
@@ -250,6 +262,9 @@ func Main(arch *sys.Arch, theArch Arch) {
 	bench.Start("dostkcheck")
 	ctxt.dostkcheck()
 
+	bench.Start("mangleTypeSym")
+	ctxt.mangleTypeSym()
+
 	if ctxt.IsELF {
 		bench.Start("doelf")
 		ctxt.doelf()
@@ -261,42 +276,47 @@ func Main(arch *sys.Arch, theArch Arch) {
 	if ctxt.IsWindows() {
 		bench.Start("dope")
 		ctxt.dope()
+		bench.Start("windynrelocsyms")
+		ctxt.windynrelocsyms()
 	}
-	bench.Start("loadlibfull")
-	ctxt.loadlibfull() // XXX do it here for now
 	if ctxt.IsAIX() {
 		bench.Start("doxcoff")
 		ctxt.doxcoff()
 	}
-	if ctxt.IsWindows() {
-		bench.Start("windynrelocsyms")
-		ctxt.windynrelocsyms()
-	}
 
-	bench.Start("mangleTypeSym")
-	ctxt.mangleTypeSym()
-
-	ctxt.setArchSyms()
-	bench.Start("addexport")
-	ctxt.addexport()
-	bench.Start("Gentext")
-	thearch.Gentext(ctxt) // trampolines, call stubs, etc.
 	bench.Start("textbuildid")
 	ctxt.textbuildid()
+	bench.Start("addexport")
+	setupdynexp(ctxt)
+	ctxt.setArchSyms(BeforeLoadlibFull)
+	ctxt.addexport()
+	bench.Start("Gentext")
+	thearch.Gentext2(ctxt, ctxt.loader) // trampolines, call stubs, etc.
+
 	bench.Start("textaddress")
 	ctxt.textaddress()
-	bench.Start("pclntab")
-	ctxt.pclntab()
-	bench.Start("findfunctab")
-	ctxt.findfunctab()
 	bench.Start("typelink")
 	ctxt.typelink()
-	bench.Start("symtab")
-	ctxt.symtab()
 	bench.Start("buildinfo")
 	ctxt.buildinfo()
-	bench.Start("dodata")
-	ctxt.dodata()
+	bench.Start("pclntab")
+	container := ctxt.pclntab()
+	bench.Start("findfunctab")
+	ctxt.findfunctab(container)
+	bench.Start("dwarfGenerateDebugSyms")
+	dwarfGenerateDebugSyms(ctxt)
+	bench.Start("symtab")
+	symGroupType := ctxt.symtab()
+	if *flagnewDoData {
+		bench.Start("dodata")
+		ctxt.dodata2(symGroupType)
+	}
+	bench.Start("loadlibfull")
+	ctxt.loadlibfull(symGroupType) // XXX do it here for now
+	if !*flagnewDoData {
+		bench.Start("dodata")
+		ctxt.dodata()
+	}
 	bench.Start("address")
 	order := ctxt.address()
 	bench.Start("dwarfcompress")
@@ -310,22 +330,18 @@ func Main(arch *sys.Arch, theArch Arch) {
 	// for which we have computed the size and offset, in a
 	// mmap'd region. The second part writes more content, for
 	// which we don't know the size.
-	var outputMmapped bool
 	if ctxt.Arch.Family != sys.Wasm {
 		// Don't mmap if we're building for Wasm. Wasm file
 		// layout is very different so filesize is meaningless.
-		err := ctxt.Out.Mmap(filesize)
-		outputMmapped = err == nil
-	}
-	if outputMmapped {
+		if err := ctxt.Out.Mmap(filesize); err != nil {
+			panic(err)
+		}
 		// Asmb will redirect symbols to the output file mmap, and relocations
 		// will be applied directly there.
 		bench.Start("Asmb")
 		thearch.Asmb(ctxt)
 		bench.Start("reloc")
 		ctxt.reloc()
-		bench.Start("Munmap")
-		ctxt.Out.Munmap()
 	} else {
 		// If we don't mmap, we need to apply relocations before
 		// writing out.
@@ -336,6 +352,9 @@ func Main(arch *sys.Arch, theArch Arch) {
 	}
 	bench.Start("Asmb2")
 	thearch.Asmb2(ctxt)
+
+	bench.Start("Munmap")
+	ctxt.Out.Close() // Close handles Munmapping if necessary.
 
 	bench.Start("undef")
 	ctxt.undef()
@@ -400,4 +419,49 @@ func startProfile() {
 			}
 		})
 	}
+}
+
+// Invoke the old linker and exit.
+func oldlink() {
+	linker := os.Args[0]
+	if strings.HasSuffix(linker, "link") {
+		linker = linker[:len(linker)-4] + "oldlink"
+	} else if strings.HasSuffix(linker, "link.exe") {
+		linker = linker[:len(linker)-8] + "oldlink.exe"
+	} else {
+		log.Fatal("cannot find oldlink. arg0=", linker)
+	}
+
+	// Copy args, filter out -go115newobj flag
+	args := make([]string, 0, len(os.Args)-1)
+	skipNext := false
+	for i, a := range os.Args {
+		if i == 0 {
+			continue // skip arg0
+		}
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if a == "-go115newobj" {
+			skipNext = true
+			continue
+		}
+		if strings.HasPrefix(a, "-go115newobj=") {
+			continue
+		}
+		args = append(args, a)
+	}
+
+	cmd := exec.Command(linker, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err := cmd.Run()
+	if err == nil {
+		os.Exit(0)
+	}
+	if _, ok := err.(*exec.ExitError); ok {
+		os.Exit(2) // would be nice to use ExitError.ExitCode(), but that is too new
+	}
+	log.Fatal("invoke oldlink failed:", err)
 }

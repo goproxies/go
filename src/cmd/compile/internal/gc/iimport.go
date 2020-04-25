@@ -10,6 +10,7 @@ package gc
 import (
 	"cmd/compile/internal/types"
 	"cmd/internal/bio"
+	"cmd/internal/goobj2"
 	"cmd/internal/obj"
 	"cmd/internal/src"
 	"encoding/binary"
@@ -95,7 +96,7 @@ func (r *intReader) uint64() uint64 {
 	return i
 }
 
-func iimport(pkg *types.Pkg, in *bio.Reader) {
+func iimport(pkg *types.Pkg, in *bio.Reader) (fingerprint goobj2.FingerprintType) {
 	ir := &intReader{in, pkg}
 
 	version := ir.uint64()
@@ -188,6 +189,14 @@ func iimport(pkg *types.Pkg, in *bio.Reader) {
 			inlineImporter[s] = iimporterAndOffset{p, off}
 		}
 	}
+
+	// Fingerprint
+	n, err := in.Read(fingerprint[:])
+	if err != nil || n != len(fingerprint) {
+		yyerror("import %s: error reading fingerprint", pkg.Path)
+		errorexit()
+	}
+	return fingerprint
 }
 
 type iimporter struct {
@@ -687,14 +696,16 @@ func (r *importReader) linkname(s *types.Sym) {
 }
 
 func (r *importReader) symIdx(s *types.Sym) {
-	lsym := s.Linksym()
-	idx := int32(r.int64())
-	if idx != -1 {
-		if s.Linkname != "" {
-			Fatalf("bad index for linknamed symbol: %v %d\n", lsym, idx)
+	if Ctxt.Flag_go115newobj {
+		lsym := s.Linksym()
+		idx := int32(r.int64())
+		if idx != -1 {
+			if s.Linkname != "" {
+				Fatalf("bad index for linknamed symbol: %v %d\n", lsym, idx)
+			}
+			lsym.SymIdx = idx
+			lsym.Set(obj.AttrIndexed, true)
 		}
-		lsym.SymIdx = idx
-		lsym.Set(obj.AttrIndexed, true)
 	}
 }
 

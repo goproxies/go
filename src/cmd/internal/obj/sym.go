@@ -34,6 +34,7 @@ package obj
 import (
 	"cmd/internal/goobj2"
 	"cmd/internal/objabi"
+	"crypto/md5"
 	"fmt"
 	"log"
 	"math"
@@ -164,6 +165,10 @@ func (ctxt *Link) Int64Sym(i int64) *LSym {
 // asm is set to true if this is called by the assembler (i.e. not the compiler),
 // in which case all the symbols are non-package (for now).
 func (ctxt *Link) NumberSyms(asm bool) {
+	if !ctxt.Flag_go115newobj {
+		return
+	}
+
 	if ctxt.Headtype == objabi.Haix {
 		// Data must be sorted to keep a constant order in TOC symbols.
 		// As they are created during Progedit, two symbols can be switched between
@@ -237,6 +242,15 @@ func (ctxt *Link) NumberSyms(asm bool) {
 		ctxt.pkgIdx[pkg] = ipkg
 		ipkg++
 	})
+
+	// Compute a fingerprint of the indices, for exporting.
+	if !asm {
+		h := md5.New()
+		for _, s := range ctxt.defs {
+			h.Write([]byte(s.Name))
+		}
+		copy(ctxt.Fingerprint[:], h.Sum(nil)[:])
+	}
 }
 
 // Returns whether s is a non-package symbol, which needs to be referenced

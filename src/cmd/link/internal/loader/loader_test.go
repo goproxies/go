@@ -27,9 +27,16 @@ func addDummyObjSym(t *testing.T, ldr *Loader, or *oReader, name string) Sym {
 	return s
 }
 
-func TestAddMaterializedSymbol(t *testing.T) {
+func mkLoader() *Loader {
 	edummy := func(s *sym.Symbol, str string, off int) {}
-	ldr := NewLoader(0, edummy)
+	er := ErrorReporter{}
+	ldr := NewLoader(0, edummy, &er)
+	er.ldr = ldr
+	return ldr
+}
+
+func TestAddMaterializedSymbol(t *testing.T) {
+	ldr := mkLoader()
 	dummyOreader := oReader{version: -1, syms: make([]Sym, 100)}
 	or := &dummyOreader
 
@@ -52,9 +59,9 @@ func TestAddMaterializedSymbol(t *testing.T) {
 		t.Fatalf("LookupOrCreateSym failed for go.info.type.uint8")
 	}
 	// Create a nameless symbol
-	es3 := ldr.CreateExtSym("")
+	es3 := ldr.CreateStaticSym("")
 	if es3 == 0 {
-		t.Fatalf("CreateExtSym failed for nameless sym")
+		t.Fatalf("CreateStaticSym failed for nameless sym")
 	}
 
 	// Grab symbol builder pointers
@@ -173,13 +180,8 @@ func TestAddMaterializedSymbol(t *testing.T) {
 	for k, sb := range []*SymbolBuilder{sb1, sb2} {
 		rsl := sb.Relocs()
 		exp := expRel[k]
-		if !sameRelocSlice(rsl, exp) {
+		if !sameRelocSlice(&rsl, exp) {
 			t.Errorf("expected relocs %v, got %v", exp, rsl)
-		}
-		relocs := ldr.Relocs(sb.Sym())
-		r0 := relocs.At(0)
-		if r0 != exp[0] {
-			t.Errorf("expected reloc %v, got %v", exp[0], r0)
 		}
 	}
 
@@ -213,12 +215,18 @@ func TestAddMaterializedSymbol(t *testing.T) {
 	}
 }
 
-func sameRelocSlice(s1 []Reloc, s2 []Reloc) bool {
-	if len(s1) != len(s2) {
+func sameRelocSlice(s1 *Relocs, s2 []Reloc) bool {
+	if s1.Count() != len(s2) {
 		return false
 	}
-	for i := 0; i < len(s1); i++ {
-		if s1[i] != s2[i] {
+	for i := 0; i < s1.Count(); i++ {
+		r1 := s1.At2(i)
+		r2 := &s2[i]
+		if r1.Sym() != r2.Sym ||
+			r1.Type() != r2.Type ||
+			r1.Off() != r2.Off ||
+			r1.Add() != r2.Add ||
+			r1.Siz() != r2.Size {
 			return false
 		}
 	}
@@ -228,8 +236,7 @@ func sameRelocSlice(s1 []Reloc, s2 []Reloc) bool {
 type addFunc func(l *Loader, s Sym, s2 Sym) Sym
 
 func TestAddDataMethods(t *testing.T) {
-	edummy := func(s *sym.Symbol, str string, off int) {}
-	ldr := NewLoader(0, edummy)
+	ldr := mkLoader()
 	dummyOreader := oReader{version: -1, syms: make([]Sym, 100)}
 	or := &dummyOreader
 
@@ -342,18 +349,16 @@ func TestAddDataMethods(t *testing.T) {
 			t.Fatalf("testing Loader.%s: sym updated should be reachable", tp.which)
 		}
 		relocs := ldr.Relocs(mi)
-		rsl := relocs.ReadAll(nil)
-		if !sameRelocSlice(rsl, tp.expRel) {
+		if !sameRelocSlice(&relocs, tp.expRel) {
 			t.Fatalf("testing Loader.%s: got relocslice %+v wanted %+v",
-				tp.which, rsl, tp.expRel)
+				tp.which, relocs, tp.expRel)
 		}
 		pmi = mi
 	}
 }
 
 func TestOuterSub(t *testing.T) {
-	edummy := func(s *sym.Symbol, str string, off int) {}
-	ldr := NewLoader(0, edummy)
+	ldr := mkLoader()
 	dummyOreader := oReader{version: -1, syms: make([]Sym, 100)}
 	or := &dummyOreader
 

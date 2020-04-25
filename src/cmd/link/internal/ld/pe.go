@@ -543,8 +543,8 @@ func (f *peFile) emitRelocations(ctxt *Link) {
 		syms   []*sym.Symbol
 	}{
 		{f.textSect, &Segtext, ctxt.Textp},
-		{f.rdataSect, &Segrodata, datap},
-		{f.dataSect, &Segdata, datap},
+		{f.rdataSect, &Segrodata, ctxt.datap},
+		{f.dataSect, &Segdata, ctxt.datap},
 	}
 	for _, s := range sects {
 		s.peSect.emitRelocations(ctxt.Out, func() int {
@@ -557,11 +557,17 @@ func (f *peFile) emitRelocations(ctxt *Link) {
 	}
 
 dwarfLoop:
-	for _, sect := range Segdwarf.Sections {
+	for i := 0; i < len(Segdwarf.Sections); i++ {
+		sect := Segdwarf.Sections[i]
+		si := dwarfp[i]
+		if si.secSym() != sect.Sym ||
+			si.secSym().Sect != sect {
+			panic("inconsistency between dwarfp and Segdwarf")
+		}
 		for _, pesect := range f.sections {
 			if sect.Name == pesect.name {
 				pesect.emitRelocations(ctxt.Out, func() int {
-					return relocsect(sect, dwarfp, sect.Vaddr)
+					return relocsect(sect, si.syms, sect.Vaddr)
 				})
 				continue dwarfLoop
 			}
@@ -1434,7 +1440,7 @@ func addPEBaseReloc(ctxt *Link) {
 	for _, s := range ctxt.Textp {
 		addPEBaseRelocSym(ctxt, s, &rt)
 	}
-	for _, s := range datap {
+	for _, s := range ctxt.datap {
 		addPEBaseRelocSym(ctxt, s, &rt)
 	}
 
@@ -1479,10 +1485,10 @@ func addpersrc(ctxt *Link) {
 
 	// relocation
 	relocs := ctxt.loader.Relocs(rsrcsym)
-	for i := 0; i < relocs.Count; i++ {
-		r := relocs.At(i)
-		p := data[r.Off:]
-		val := uint32(int64(h.virtualAddress) + r.Add)
+	for i := 0; i < relocs.Count(); i++ {
+		r := relocs.At2(i)
+		p := data[r.Off():]
+		val := uint32(int64(h.virtualAddress) + r.Add())
 
 		// 32-bit little-endian
 		p[0] = byte(val)

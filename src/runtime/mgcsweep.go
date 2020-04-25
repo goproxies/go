@@ -64,6 +64,7 @@ func finishsweep_m() {
 func bgsweep(c chan int) {
 	sweep.g = getg()
 
+	lockInit(&sweep.lock, lockRankSweep)
 	lock(&sweep.lock)
 	sweep.parked = true
 	c <- 1
@@ -245,6 +246,7 @@ func (s *mspan) sweep(preserve bool) bool {
 	// 2. A tiny object can have several finalizers setup for different offsets.
 	//    If such object is not marked, we need to queue all finalizers at once.
 	// Both 1 and 2 are possible at the same time.
+	hadSpecials := s.specials != nil
 	specialp := &s.specials
 	special := *specialp
 	for special != nil {
@@ -288,6 +290,9 @@ func (s *mspan) sweep(preserve bool) bool {
 			specialp = &special.next
 			special = *specialp
 		}
+	}
+	if go115NewMarkrootSpans && hadSpecials && s.specials == nil {
+		spanHasNoSpecials(s)
 	}
 
 	if debug.allocfreetrace != 0 || debug.clobberfree != 0 || raceenabled || msanenabled {

@@ -790,6 +790,7 @@ func NewPageAlloc(chunks, scav map[ChunkIdx][]BitRange) *PageAlloc {
 
 	// We've got an entry, so initialize the pageAlloc.
 	p.init(new(mutex), nil)
+	lockInit(p.mheapLock, lockRankMheap)
 	p.test = true
 
 	for i, init := range chunks {
@@ -974,4 +975,12 @@ func MapHashCheck(m interface{}, k interface{}) (uintptr, uintptr) {
 	x := mt.hasher(noescape(p), uintptr(mh.hash0))
 	y := typehash(kt, noescape(p), uintptr(mh.hash0))
 	return x, y
+}
+
+func MSpanCountAlloc(bits []byte) int {
+	s := mspan{
+		nelems:     uintptr(len(bits) * 8),
+		gcmarkBits: (*gcBits)(unsafe.Pointer(&bits[0])),
+	}
+	return s.countAlloc()
 }

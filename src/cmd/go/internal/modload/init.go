@@ -26,7 +26,6 @@ import (
 	"cmd/go/internal/lockedfile"
 	"cmd/go/internal/modconv"
 	"cmd/go/internal/modfetch"
-	"cmd/go/internal/modfetch/codehost"
 	"cmd/go/internal/mvs"
 	"cmd/go/internal/search"
 
@@ -178,17 +177,6 @@ func Init() {
 		base.Fatalf("$GOPATH/go.mod exists but should not")
 	}
 
-	oldSrcMod := filepath.Join(list[0], "src/mod")
-	pkgMod := filepath.Join(list[0], "pkg/mod")
-	infoOld, errOld := os.Stat(oldSrcMod)
-	_, errMod := os.Stat(pkgMod)
-	if errOld == nil && infoOld.IsDir() && errMod != nil && os.IsNotExist(errMod) {
-		os.Rename(oldSrcMod, pkgMod)
-	}
-
-	modfetch.PkgMod = pkgMod
-	codehost.WorkRoot = filepath.Join(pkgMod, "cache/vcs")
-
 	cfg.ModulesEnabled = true
 	load.ModBinDir = BinDir
 	load.ModLookup = Lookup
@@ -225,13 +213,6 @@ func Init() {
 
 func init() {
 	load.ModInit = Init
-
-	// Set modfetch.PkgMod and codehost.WorkRoot unconditionally,
-	// so that go clean -modcache and go mod download can run even without modules enabled.
-	if list := filepath.SplitList(cfg.BuildContext.GOPATH); len(list) > 0 && list[0] != "" {
-		modfetch.PkgMod = filepath.Join(list[0], "pkg/mod")
-		codehost.WorkRoot = filepath.Join(list[0], "pkg/mod/cache/vcs")
-	}
 }
 
 // WillBeEnabled checks whether modules should be enabled but does not
@@ -624,13 +605,14 @@ func findAltConfig(dir string) (root, name string) {
 		panic("dir not set")
 	}
 	dir = filepath.Clean(dir)
+	if rel := search.InDir(dir, cfg.BuildContext.GOROOT); rel != "" {
+		// Don't suggest creating a module from $GOROOT/.git/config
+		// or a config file found in any parent of $GOROOT (see #34191).
+		return "", ""
+	}
 	for {
 		for _, name := range altConfigs {
 			if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && !fi.IsDir() {
-				if rel := search.InDir(dir, cfg.BuildContext.GOROOT); rel == "." {
-					// Don't suggest creating a module from $GOROOT/.git/config.
-					return "", ""
-				}
 				return dir, name
 			}
 		}

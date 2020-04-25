@@ -890,7 +890,7 @@ func machosymtab(ctxt *Link) {
 		// symbols like crosscall2 are in pclntab and end up
 		// pointing at the host binary, breaking unwinding.
 		// See Issue #18190.
-		cexport := !isGoSymbol && (ctxt.BuildMode != BuildModePlugin || onlycsymbol(s))
+		cexport := !isGoSymbol && (ctxt.BuildMode != BuildModePlugin || onlycsymbol(s.Name))
 		if cexport || export || isGoSymbol {
 			symstr.AddUint8('_')
 		}
@@ -1060,13 +1060,19 @@ func Machoemitreloc(ctxt *Link) {
 
 	machorelocsect(ctxt, Segtext.Sections[0], ctxt.Textp)
 	for _, sect := range Segtext.Sections[1:] {
-		machorelocsect(ctxt, sect, datap)
+		machorelocsect(ctxt, sect, ctxt.datap)
 	}
 	for _, sect := range Segdata.Sections {
-		machorelocsect(ctxt, sect, datap)
+		machorelocsect(ctxt, sect, ctxt.datap)
 	}
-	for _, sect := range Segdwarf.Sections {
-		machorelocsect(ctxt, sect, dwarfp)
+	for i := 0; i < len(Segdwarf.Sections); i++ {
+		sect := Segdwarf.Sections[i]
+		si := dwarfp[i]
+		if si.secSym() != sect.Sym ||
+			si.secSym().Sect != sect {
+			panic("inconsistency between dwarfp and Segdwarf")
+		}
+		machorelocsect(ctxt, sect, si.syms)
 	}
 }
 

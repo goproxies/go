@@ -39,23 +39,15 @@ import (
 	"debug/elf"
 	"fmt"
 	"log"
+	"sync"
 )
 
-func gentext(ctxt *ld.Link) {
-	if !ctxt.DynlinkingGo() {
+func gentext2(ctxt *ld.Link, ldr *loader.Loader) {
+	initfunc, addmoduledata := ld.PrepareAddmoduledata(ctxt)
+	if initfunc == nil {
 		return
 	}
-	addmoduledata := ctxt.Syms.Lookup("runtime.addmoduledata", 0)
-	if addmoduledata.Type == sym.STEXT && ctxt.BuildMode != ld.BuildModePlugin {
-		// we're linking a module containing the runtime -> no need for
-		// an init function
-		return
-	}
-	addmoduledata.Attr |= sym.AttrReachable
-	initfunc := ctxt.Syms.Lookup("go.link.addmoduledata", 0)
-	initfunc.Type = sym.STEXT
-	initfunc.Attr |= sym.AttrLocal
-	initfunc.Attr |= sym.AttrReachable
+
 	o := func(op uint32) {
 		initfunc.AddUint32(ctxt.Arch, op)
 	}
@@ -66,33 +58,27 @@ func gentext(ctxt *ld.Link) {
 	// 	4: R_AARCH64_ADD_ABS_LO12_NC	local.moduledata
 	o(0x90000000)
 	o(0x91000000)
-	rel := initfunc.AddRel()
-	rel.Off = 0
-	rel.Siz = 8
-	rel.Sym = ctxt.Moduledata
-	rel.Type = objabi.R_ADDRARM64
+	rel := loader.Reloc{
+		Off:  0,
+		Size: 8,
+		Type: objabi.R_ADDRARM64,
+		Sym:  ctxt.Moduledata2,
+	}
+	initfunc.AddReloc(rel)
 
 	// 8:	14000000 	b	0 <runtime.addmoduledata>
 	// 	8: R_AARCH64_CALL26	runtime.addmoduledata
 	o(0x14000000)
-	rel = initfunc.AddRel()
-	rel.Off = 8
-	rel.Siz = 4
-	rel.Sym = ctxt.Syms.Lookup("runtime.addmoduledata", 0)
-	rel.Type = objabi.R_CALLARM64 // Really should be R_AARCH64_JUMP26 but doesn't seem to make any difference
-
-	if ctxt.BuildMode == ld.BuildModePlugin {
-		ctxt.Textp = append(ctxt.Textp, addmoduledata)
+	rel2 := loader.Reloc{
+		Off:  8,
+		Size: 4,
+		Type: objabi.R_CALLARM64, // Really should be R_AARCH64_JUMP26 but doesn't seem to make any difference
+		Sym:  addmoduledata,
 	}
-	ctxt.Textp = append(ctxt.Textp, initfunc)
-	initarray_entry := ctxt.Syms.Lookup("go.link.addmoduledatainit", 0)
-	initarray_entry.Attr |= sym.AttrReachable
-	initarray_entry.Attr |= sym.AttrLocal
-	initarray_entry.Type = sym.SINITARR
-	initarray_entry.AddAddr(ctxt.Arch, initfunc)
+	initfunc.AddReloc(rel2)
 }
 
-func adddynrel(target *ld.Target, syms *ld.ArchSyms, s *sym.Symbol, r *sym.Reloc) bool {
+func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s *sym.Symbol, r *sym.Reloc) bool {
 	targ := r.Sym
 
 	switch r.Type {
@@ -824,28 +810,28 @@ func asmb(ctxt *ld.Link) {
 		ld.Asmbelfsetup()
 	}
 
+	var wg sync.WaitGroup
 	sect := ld.Segtext.Sections[0]
-	ctxt.Out.SeekSet(int64(sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff))
-	ld.Codeblk(ctxt, int64(sect.Vaddr), int64(sect.Length))
-	for _, sect = range ld.Segtext.Sections[1:] {
-		ctxt.Out.SeekSet(int64(sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff))
-		ld.Datblk(ctxt, int64(sect.Vaddr), int64(sect.Length))
+	offset := sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff
+	ld.WriteParallel(&wg, ld.Codeblk, ctxt, offset, sect.Vaddr, sect.Length)
+
+	for _, sect := range ld.Segtext.Sections[1:] {
+		offset := sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff
+		ld.WriteParallel(&wg, ld.Datblk, ctxt, offset, sect.Vaddr, sect.Length)
 	}
 
 	if ld.Segrodata.Filelen > 0 {
-		ctxt.Out.SeekSet(int64(ld.Segrodata.Fileoff))
-		ld.Datblk(ctxt, int64(ld.Segrodata.Vaddr), int64(ld.Segrodata.Filelen))
+		ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segrodata.Fileoff, ld.Segrodata.Vaddr, ld.Segrodata.Filelen)
 	}
+
 	if ld.Segrelrodata.Filelen > 0 {
-		ctxt.Out.SeekSet(int64(ld.Segrelrodata.Fileoff))
-		ld.Datblk(ctxt, int64(ld.Segrelrodata.Vaddr), int64(ld.Segrelrodata.Filelen))
+		ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segrelrodata.Fileoff, ld.Segrelrodata.Vaddr, ld.Segrelrodata.Filelen)
 	}
 
-	ctxt.Out.SeekSet(int64(ld.Segdata.Fileoff))
-	ld.Datblk(ctxt, int64(ld.Segdata.Vaddr), int64(ld.Segdata.Filelen))
+	ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segdata.Fileoff, ld.Segdata.Vaddr, ld.Segdata.Filelen)
 
-	ctxt.Out.SeekSet(int64(ld.Segdwarf.Fileoff))
-	ld.Dwarfblk(ctxt, int64(ld.Segdwarf.Vaddr), int64(ld.Segdwarf.Filelen))
+	ld.WriteParallel(&wg, ld.Dwarfblk, ctxt, ld.Segdwarf.Fileoff, ld.Segdwarf.Vaddr, ld.Segdwarf.Filelen)
+	wg.Wait()
 }
 
 func asmb2(ctxt *ld.Link) {
@@ -880,7 +866,6 @@ func asmb2(ctxt *ld.Link) {
 		default:
 			if ctxt.IsELF {
 				ld.Asmelfsym(ctxt)
-				ctxt.Out.Flush()
 				ctxt.Out.Write(ld.Elfstrdat)
 
 				if ctxt.LinkMode == ld.LinkExternal {
@@ -890,13 +875,11 @@ func asmb2(ctxt *ld.Link) {
 
 		case objabi.Hplan9:
 			ld.Asmplan9sym(ctxt)
-			ctxt.Out.Flush()
 
 			sym := ctxt.Syms.Lookup("pclntab", 0)
 			if sym != nil {
 				ld.Lcsize = int32(len(sym.P))
 				ctxt.Out.Write(sym.P)
-				ctxt.Out.Flush()
 			}
 
 		case objabi.Hdarwin:
@@ -929,7 +912,6 @@ func asmb2(ctxt *ld.Link) {
 		ld.Asmbmacho(ctxt)
 	}
 
-	ctxt.Out.Flush()
 	if *ld.FlagC {
 		fmt.Printf("textsize=%d\n", ld.Segtext.Filelen)
 		fmt.Printf("datsize=%d\n", ld.Segdata.Filelen)
