@@ -96,7 +96,6 @@ var (
 	cpuprofile     = flag.String("cpuprofile", "", "write cpu profile to `file`")
 	memprofile     = flag.String("memprofile", "", "write memory profile to `file`")
 	memprofilerate = flag.Int64("memprofilerate", 0, "set runtime.MemProfileRate to `rate`")
-	flagnewDoData  = flag.Bool("newdodata", true, "New style dodata")
 
 	benchmarkFlag     = flag.String("benchmark", "", "set to 'mem' or 'cpu' to enable phase benchmarking")
 	benchmarkFileFlag = flag.String("benchmarkprofile", "", "emit phase profiles to `base`_phase.{cpu,mem}prof")
@@ -200,24 +199,6 @@ func Main(arch *sys.Arch, theArch Arch) {
 	bench.Start("Archinit")
 	thearch.Archinit(ctxt)
 
-	if *flagnewDoData {
-		// New dodata() is currently only implemented for selected targets.
-		switch {
-		case ctxt.IsElf():
-			if !(ctxt.IsAMD64() || ctxt.Is386()) {
-				*flagnewDoData = false
-			}
-		case ctxt.IsDarwin():
-			if !ctxt.IsAMD64() {
-				*flagnewDoData = false
-			}
-		case ctxt.IsPlan9(), ctxt.IsWasm():
-			// supported
-		default:
-			*flagnewDoData = false
-		}
-	}
-
 	if ctxt.linkShared && !ctxt.IsELF {
 		Exitf("-linkshared can only be used on elf systems")
 	}
@@ -317,16 +298,10 @@ func Main(arch *sys.Arch, theArch Arch) {
 	dwarfGenerateDebugSyms(ctxt)
 	bench.Start("symtab")
 	symGroupType := ctxt.symtab()
-	if *flagnewDoData {
-		bench.Start("dodata")
-		ctxt.dodata2(symGroupType)
-	}
+	bench.Start("dodata")
+	ctxt.dodata2(symGroupType)
 	bench.Start("loadlibfull")
-	ctxt.loadlibfull(symGroupType) // XXX do it here for now
-	if !*flagnewDoData {
-		bench.Start("dodata")
-		ctxt.dodata()
-	}
+	ctxt.loadlibfull() // XXX do it here for now
 	bench.Start("address")
 	order := ctxt.address()
 	bench.Start("dwarfcompress")
@@ -346,20 +321,13 @@ func Main(arch *sys.Arch, theArch Arch) {
 		if err := ctxt.Out.Mmap(filesize); err != nil {
 			panic(err)
 		}
-		// Asmb will redirect symbols to the output file mmap, and relocations
-		// will be applied directly there.
-		bench.Start("Asmb")
-		thearch.Asmb(ctxt)
-		bench.Start("reloc")
-		ctxt.reloc()
-	} else {
-		// If we don't mmap, we need to apply relocations before
-		// writing out.
-		bench.Start("reloc")
-		ctxt.reloc()
-		bench.Start("Asmb")
-		thearch.Asmb(ctxt)
 	}
+	// Asmb will redirect symbols to the output file mmap, and relocations
+	// will be applied directly there.
+	bench.Start("Asmb")
+	thearch.Asmb(ctxt)
+	bench.Start("reloc")
+	ctxt.reloc()
 	bench.Start("Asmb2")
 	thearch.Asmb2(ctxt)
 
@@ -371,7 +339,7 @@ func Main(arch *sys.Arch, theArch Arch) {
 	bench.Start("hostlink")
 	ctxt.hostlink()
 	if ctxt.Debugvlog != 0 {
-		ctxt.Logf("%d symbols\n", len(ctxt.Syms.Allsym))
+		ctxt.Logf("%d symbols, %d reachable\n", len(ctxt.loader.Syms), ctxt.loader.NReachableSym())
 		ctxt.Logf("%d liveness data\n", liveness)
 	}
 	bench.Start("Flush")

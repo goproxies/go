@@ -147,6 +147,16 @@ func (bm Bitmap) Has(i Sym) bool {
 func (bm Bitmap) Len() int {
 	return len(bm) * 32
 }
+
+// return the number of bits set.
+func (bm Bitmap) Count() int {
+	s := 0
+	for _, x := range bm {
+		s += bits.OnesCount32(x)
+	}
+	return s
+}
+
 func MakeBitmap(n int) Bitmap {
 	return make(Bitmap, (n+31)/32)
 }
@@ -623,6 +633,11 @@ func (l *Loader) NSym() int {
 // Number of defined Go symbols.
 func (l *Loader) NDef() int {
 	return int(l.extStart)
+}
+
+// Number of reachable symbols.
+func (l *Loader) NReachableSym() int {
+	return l.attrReachable.Count()
 }
 
 // Returns the raw (unpatched) name of the i-th symbol.
@@ -1276,6 +1291,7 @@ func (l *Loader) DynidSyms() []Sym {
 	for s := range l.dynid {
 		sl = append(sl, s)
 	}
+	sort.Slice(sl, func(i, j int) bool { return sl[i] < sl[j] })
 	return sl
 }
 
@@ -2194,7 +2210,6 @@ func (l *Loader) ExtractSymbols(syms *sym.Symbols) {
 		if s == nil {
 			continue
 		}
-		syms.Allsym = append(syms.Allsym, s) // XXX still add to Allsym for now, as there are code looping through Allsym
 		if s.Version < 0 {
 			s.Version = int16(anonVerReplacement)
 		}
@@ -2208,7 +2223,6 @@ func (l *Loader) ExtractSymbols(syms *sym.Symbols) {
 		}
 		s := l.allocSym(name, ver)
 		l.installSym(i, s)
-		syms.Allsym = append(syms.Allsym, s) // XXX see above
 		return s
 	}
 	syms.Lookup = l.SymLookup
@@ -2220,7 +2234,6 @@ func (l *Loader) ExtractSymbols(syms *sym.Symbols) {
 		i := l.newExtSym(name, ver)
 		s := l.allocSym(name, ver)
 		l.installSym(i, s)
-		syms.Allsym = append(syms.Allsym, s) // XXX see above
 		return s
 	}
 }

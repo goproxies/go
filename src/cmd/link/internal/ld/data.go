@@ -140,11 +140,14 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 	if len(s.R) == 0 {
 		return
 	}
-	if s.Attr.ReadOnly() {
+	if target.IsWasm() && s.Attr.ReadOnly() {
 		// The symbol's content is backed by read-only memory.
 		// Copy it to writable memory to apply relocations.
+		// Only need to do this on Wasm. On other platforms we
+		// apply relocations to the output buffer, which is
+		// always writeable.
 		s.P = append([]byte(nil), s.P...)
-		s.Attr.Set(sym.AttrReadOnly, false)
+		// No need to unset AttrReadOnly because it will not be used.
 	}
 	for ri := int32(0); ri < int32(len(s.R)); ri++ {
 		r := &s.R[ri]
@@ -579,8 +582,10 @@ func (ctxt *Link) reloc() {
 	syms := &ctxt.ArchSyms
 	wg.Add(3)
 	go func() {
-		for _, s := range ctxt.Textp {
-			relocsym(target, ldr, reporter, syms, s)
+		if !ctxt.IsWasm() { // On Wasm, text relocations are applied in Asmb2.
+			for _, s := range ctxt.Textp {
+				relocsym(target, ldr, reporter, syms, s)
+			}
 		}
 		wg.Done()
 	}()
@@ -1336,11 +1341,6 @@ func (ctxt *Link) dodata2(symGroupType []sym.SymKind) {
 		}
 		state.data2[st] = append(state.data2[st], s)
 
-		// Set explicit alignment here, so as to avoid having to update
-		// symbol alignment in doDataSect2, which would cause a concurrent
-		// map read/write violation.
-		state.symalign2(s)
-
 		// Similarly with checking the onlist attr.
 		if ldr.AttrOnList(s) {
 			log.Fatalf("symbol %s listed multiple times", ldr.SymName(s))
@@ -1361,6 +1361,17 @@ func (ctxt *Link) dodata2(symGroupType []sym.SymKind) {
 
 	// Move any RO data with relocations to a separate section.
 	state.makeRelroForSharedLib2(ctxt)
+
+	// Set explicit alignment here, so as to avoid having to update
+	// symbol alignment in doDataSect2, which would cause a concurrent
+	// map read/write violation.
+	// NOTE: this needs to be done after dynreloc2, where symbol size
+	// may change.
+	for _, list := range state.data2 {
+		for _, s := range list {
+			state.symalign2(s)
+		}
+	}
 
 	// Sort symbols.
 	var wg sync.WaitGroup
@@ -1887,18 +1898,6 @@ func (state *dodataState) allocateDwarfSections2(ctxt *Link) {
 }
 
 func (state *dodataState) dodataSect2(ctxt *Link, symn sym.SymKind, syms []loader.Sym) (result []loader.Sym, maxAlign int32) {
-	if ctxt.HeadType == objabi.Hdarwin {
-		// Some symbols may no longer belong in syms
-		// due to movement in machosymorder.
-		newSyms := make([]loader.Sym, 0, len(syms))
-		for _, s := range syms {
-			if state.symType(s) == symn {
-				newSyms = append(newSyms, s)
-			}
-		}
-		syms = newSyms
-	}
-
 	var head, tail loader.Sym
 	ldr := ctxt.loader
 	for _, s := range syms {
@@ -2509,8 +2508,6 @@ func compressSyms(ctxt *Link, syms []*sym.Symbol) []byte {
 		if len(s.R) != 0 && wasReadOnly {
 			relocbuf = append(relocbuf[:0], s.P...)
 			s.P = relocbuf
-			// TODO: This function call needs to be parallelized when the loader wavefront gets here.
-			s.Attr.Set(sym.AttrReadOnly, false)
 		}
 		relocsym(target, ldr, reporter, archSyms, s)
 		if _, err := z.Write(s.P); err != nil {
@@ -2532,7 +2529,6 @@ func compressSyms(ctxt *Link, syms []*sym.Symbol) []byte {
 		// contents, in which case we still need s.P.
 		if len(s.R) != 0 && wasReadOnly {
 			s.P = oldP
-			s.Attr.Set(sym.AttrReadOnly, wasReadOnly)
 			for i := range s.R {
 				s.R[i].Done = false
 			}
