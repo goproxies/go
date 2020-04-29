@@ -343,7 +343,7 @@ func adddynrel2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s load
 func elfreloc1(ctxt *ld.Link, r *sym.Reloc, sectoff int64) bool {
 	ctxt.Out.Write32(uint32(sectoff))
 
-	elfsym := r.Xsym.ElfsymForReloc()
+	elfsym := ld.ElfSymForReloc(ctxt, r.Xsym)
 	switch r.Type {
 	default:
 		return false
@@ -433,6 +433,19 @@ func pereloc1(arch *sys.Arch, out *ld.OutBuf, s *sym.Symbol, r *sym.Reloc, secto
 	out.Write16(uint16(v))
 
 	return true
+}
+
+func archreloc2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r *loader.Reloc2, sym loader.Sym, val int64) (int64, bool) {
+	if target.IsExternal() {
+		return val, false
+	}
+	switch r.Type() {
+	case objabi.R_CONST:
+		return r.Add(), true
+	case objabi.R_GOTOFF:
+		return ldr.SymValue(r.Sym()) + r.Add() - ldr.SymValue(syms.GOT2), true
+	}
+	return val, false
 }
 
 func archreloc(target *ld.Target, syms *ld.ArchSyms, r *sym.Reloc, s *sym.Symbol, val int64) (int64, bool) {
@@ -564,7 +577,7 @@ func addgotsym2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s load
 	}
 }
 
-func asmb(ctxt *ld.Link) {
+func asmb(ctxt *ld.Link, _ *loader.Loader) {
 	if ctxt.IsELF {
 		ld.Asmbelfsetup()
 	}

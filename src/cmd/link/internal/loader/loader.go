@@ -216,6 +216,8 @@ type Loader struct {
 	sects    []*sym.Section // sections
 	symSects []uint16       // symbol's section, index to sects array
 
+	outdata [][]byte // symbol's data in the output buffer
+
 	itablink map[Sym]struct{} // itablink[j] defined if j is go.itablink.*
 
 	objByPkg map[string]*oReader // map package path to its Go object reader
@@ -255,15 +257,17 @@ type Loader struct {
 
 	align map[Sym]int32 // stores alignment for symbols
 
-	dynimplib  map[Sym]string      // stores Dynimplib symbol attribute
-	dynimpvers map[Sym]string      // stores Dynimpvers symbol attribute
-	localentry map[Sym]uint8       // stores Localentry symbol attribute
-	extname    map[Sym]string      // stores Extname symbol attribute
-	elfType    map[Sym]elf.SymType // stores elf type symbol property
-	symPkg     map[Sym]string      // stores package for symbol, or library for shlib-derived syms
-	plt        map[Sym]int32       // stores dynimport for pe objects
-	got        map[Sym]int32       // stores got for pe objects
-	dynid      map[Sym]int32       // stores Dynid for symbol
+	dynimplib   map[Sym]string      // stores Dynimplib symbol attribute
+	dynimpvers  map[Sym]string      // stores Dynimpvers symbol attribute
+	localentry  map[Sym]uint8       // stores Localentry symbol attribute
+	extname     map[Sym]string      // stores Extname symbol attribute
+	elfType     map[Sym]elf.SymType // stores elf type symbol property
+	elfSym      map[Sym]int32       // stores elf sym symbol property
+	localElfSym map[Sym]int32       // stores "local" elf sym symbol property
+	symPkg      map[Sym]string      // stores package for symbol, or library for shlib-derived syms
+	plt         map[Sym]int32       // stores dynimport for pe objects
+	got         map[Sym]int32       // stores got for pe objects
+	dynid       map[Sym]int32       // stores Dynid for symbol
 
 	relocVariant map[relocId]sym.RelocVariant // stores variant relocs
 
@@ -331,6 +335,8 @@ func NewLoader(flags uint32, elfsetstring elfsetstringFunc, reporter *ErrorRepor
 		extname:              make(map[Sym]string),
 		attrReadOnly:         make(map[Sym]bool),
 		elfType:              make(map[Sym]elf.SymType),
+		elfSym:               make(map[Sym]int32),
+		localElfSym:          make(map[Sym]int32),
 		symPkg:               make(map[Sym]string),
 		plt:                  make(map[Sym]int32),
 		got:                  make(map[Sym]int32),
@@ -756,6 +762,14 @@ func (l *Loader) SetAttrLocal(i Sym, v bool) {
 	}
 }
 
+// SymAddr checks that a symbol is reachable, and returns its value.
+func (l *Loader) SymAddr(i Sym) int64 {
+	if !l.AttrReachable(i) {
+		panic("unreachable symbol in symaddr")
+	}
+	return l.values[i]
+}
+
 // AttrNotInSymbolTable returns true for symbols that should not be
 // added to the symbol table of the final generated load module.
 func (l *Loader) AttrNotInSymbolTable(i Sym) bool {
@@ -1050,6 +1064,11 @@ func (l *Loader) SetSymValue(i Sym, val int64) {
 	l.values[i] = val
 }
 
+// AddToSymValue adds to the value of the i-th symbol. i is the global index.
+func (l *Loader) AddToSymValue(i Sym, val int64) {
+	l.values[i] += val
+}
+
 // Returns the symbol content of the i-th symbol. i is global index.
 func (l *Loader) Data(i Sym) []byte {
 	if l.IsExternal(i) {
@@ -1061,6 +1080,32 @@ func (l *Loader) Data(i Sym) []byte {
 	}
 	r, li := l.toLocal(i)
 	return r.Data(li)
+}
+
+// Returns the data of the i-th symbol in the output buffer.
+func (l *Loader) OutData(i Sym) []byte {
+	if int(i) < len(l.outdata) && l.outdata[i] != nil {
+		return l.outdata[i]
+	}
+	return l.Data(i)
+}
+
+// SetOutData sets the position of the data of the i-th symbol in the output buffer.
+// i is global index.
+func (l *Loader) SetOutData(i Sym, data []byte) {
+	if l.IsExternal(i) {
+		pp := l.getPayload(i)
+		if pp != nil {
+			pp.data = data
+			return
+		}
+	}
+	l.outdata[i] = data
+}
+
+// InitOutData initializes the slice used to store symbol output data.
+func (l *Loader) InitOutData() {
+	l.outdata = make([][]byte, l.extStart)
 }
 
 // SymAlign returns the alignment for a symbol.
@@ -1219,6 +1264,42 @@ func (l *Loader) SetSymElfType(i Sym, et elf.SymType) {
 		delete(l.elfType, i)
 	} else {
 		l.elfType[i] = et
+	}
+}
+
+// SymElfSym returns the ELF symbol index for a given loader
+// symbol, assigned during ELF symtab generation.
+func (l *Loader) SymElfSym(i Sym) int32 {
+	return l.elfSym[i]
+}
+
+// SetSymElfSym sets the elf symbol index for a symbol.
+func (l *Loader) SetSymElfSym(i Sym, es int32) {
+	if i == 0 {
+		panic("bad sym index")
+	}
+	if es == 0 {
+		delete(l.elfSym, i)
+	} else {
+		l.elfSym[i] = es
+	}
+}
+
+// SymLocalElfSym returns the "local" ELF symbol index for a given loader
+// symbol, assigned during ELF symtab generation.
+func (l *Loader) SymLocalElfSym(i Sym) int32 {
+	return l.localElfSym[i]
+}
+
+// SetSymLocalElfSym sets the "local" elf symbol index for a symbol.
+func (l *Loader) SetSymLocalElfSym(i Sym, es int32) {
+	if i == 0 {
+		panic("bad sym index")
+	}
+	if es == 0 {
+		delete(l.localElfSym, i)
+	} else {
+		l.localElfSym[i] = es
 	}
 }
 
@@ -1935,7 +2016,7 @@ func (l *Loader) preprocess(arch *sys.Arch, s Sym, name string) {
 }
 
 // Load full contents.
-func (l *Loader) LoadFull(arch *sys.Arch, syms *sym.Symbols) {
+func (l *Loader) LoadFull(arch *sys.Arch, syms *sym.Symbols, needReloc bool) {
 	// create all Symbols first.
 	l.growSyms(l.NSym())
 	l.growSects(l.NSym())
@@ -1968,7 +2049,9 @@ func (l *Loader) LoadFull(arch *sys.Arch, syms *sym.Symbols) {
 	}
 
 	// allocate a single large slab of relocations for all live symbols
-	l.relocBatch = make([]sym.Reloc, nr)
+	if needReloc {
+		l.relocBatch = make([]sym.Reloc, nr)
+	}
 
 	// convert payload-based external symbols into sym.Symbol-based
 	for _, i := range toConvert {
@@ -1979,21 +2062,15 @@ func (l *Loader) LoadFull(arch *sys.Arch, syms *sym.Symbols) {
 		s.Version = int16(pp.ver)
 		s.Type = pp.kind
 		s.Size = pp.size
-		if pp.gotype != 0 {
-			s.Gotype = l.Syms[pp.gotype]
-		}
-		if f, ok := l.symPkg[i]; ok {
-			s.File = f
-		} else if pp.objidx != 0 {
-			s.File = l.objs[pp.objidx].r.unit.Lib.Pkg
-		}
 
 		// Copy relocations
-		batch := l.relocBatch
-		s.R = batch[:len(pp.relocs):len(pp.relocs)]
-		l.relocBatch = batch[len(pp.relocs):]
-		relocs := l.Relocs(i)
-		l.convertRelocations(i, &relocs, s, false)
+		if needReloc {
+			batch := l.relocBatch
+			s.R = batch[:len(pp.relocs):len(pp.relocs)]
+			l.relocBatch = batch[len(pp.relocs):]
+			relocs := l.Relocs(i)
+			l.convertRelocations(i, &relocs, s, false)
+		}
 
 		// Copy data
 		s.P = pp.data
@@ -2004,7 +2081,7 @@ func (l *Loader) LoadFull(arch *sys.Arch, syms *sym.Symbols) {
 
 	// load contents of defined symbols
 	for _, o := range l.objs[1:] {
-		loadObjFull(l, o.r)
+		loadObjFull(l, o.r, needReloc)
 	}
 
 	// Note: resolution of ABI aliases is now also handled in
@@ -2148,22 +2225,7 @@ func (l *Loader) PropagateLoaderChangesToSymbols(toconvert []Sym, anonVerReplace
 			relfix = true
 		}
 
-		// For 'new' symbols, copy other content (such as Gotype,
-		// sym file, relocations, etc).
-		if isnew {
-			if gt := l.SymGoType(cand); gt != 0 {
-				s.Gotype = l.Syms[gt]
-			}
-			if f, ok := l.symPkg[cand]; ok {
-				s.File = f
-			} else {
-				r, _ := l.toLocal(cand)
-				if r != nil && r != l.extReader {
-					s.File = l.SymPkg(cand)
-				}
-			}
-		}
-
+		// For 'new' symbols, copy other content.
 		if relfix {
 			relocfixup = append(relocfixup, cand)
 		}
@@ -2263,6 +2325,7 @@ func (l *Loader) installSym(i Sym, s *sym.Symbol) {
 		panic("sym already present in installSym")
 	}
 	l.Syms[i] = s
+	s.SymIdx = sym.LoaderSym(i)
 }
 
 // addNewSym adds a new sym.Symbol to the i-th index in the list of symbols.
@@ -2276,7 +2339,6 @@ func (l *Loader) addNewSym(i Sym, name string, ver int, unit *sym.CompilationUni
 		t = s.Type
 	}
 	s.Type = t
-	s.Unit = unit
 	l.growSyms(int(i))
 	l.installSym(i, s)
 	return s
@@ -2540,12 +2602,7 @@ func (l *Loader) CreateStaticSym(name string) Sym {
 	return l.newExtSym(name, l.anonVersion)
 }
 
-func loadObjFull(l *Loader, r *oReader) {
-	resolveSymRef := func(s goobj2.SymRef) *sym.Symbol {
-		i := l.resolve(r, s)
-		return l.Syms[i]
-	}
-
+func loadObjFull(l *Loader, r *oReader, needReloc bool) {
 	for i, n := 0, r.NSym()+r.NNonpkgdef(); i < n; i++ {
 		// A symbol may be a dup or overwritten. In this case, its
 		// content will actually be provided by a different object
@@ -2567,27 +2624,23 @@ func loadObjFull(l *Loader, r *oReader) {
 		size := osym.Siz()
 
 		// Symbol data
-		s.P = r.Data(i)
-		s.Attr.Set(sym.AttrReadOnly, r.ReadOnly())
+		s.P = l.OutData(gi)
 
 		// Relocs
-		relocs := l.relocs(r, i)
-		batch := l.relocBatch
-		s.R = batch[:relocs.Count():relocs.Count()]
-		l.relocBatch = batch[relocs.Count():]
-		l.convertRelocations(gi, &relocs, s, false)
+		if needReloc {
+			relocs := l.relocs(r, i)
+			batch := l.relocBatch
+			s.R = batch[:relocs.Count():relocs.Count()]
+			l.relocBatch = batch[relocs.Count():]
+			l.convertRelocations(gi, &relocs, s, false)
+		}
 
 		// Aux symbol info
 		auxs := r.Auxs(i)
 		for j := range auxs {
 			a := &auxs[j]
 			switch a.Type() {
-			case goobj2.AuxGotype:
-				typ := resolveSymRef(a.Sym())
-				if typ != nil {
-					s.Gotype = typ
-				}
-			case goobj2.AuxFuncInfo, goobj2.AuxFuncdata:
+			case goobj2.AuxFuncInfo, goobj2.AuxFuncdata, goobj2.AuxGotype:
 				// already handled
 			case goobj2.AuxDwarfInfo, goobj2.AuxDwarfLoc, goobj2.AuxDwarfRanges, goobj2.AuxDwarfLines:
 				// ignored for now
@@ -2596,7 +2649,6 @@ func loadObjFull(l *Loader, r *oReader) {
 			}
 		}
 
-		s.File = r.pkgprefix[:len(r.pkgprefix)-1]
 		if s.Size < int64(size) {
 			s.Size = int64(size)
 		}

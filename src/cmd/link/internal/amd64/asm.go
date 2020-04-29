@@ -396,7 +396,7 @@ func adddynrel2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s load
 func elfreloc1(ctxt *ld.Link, r *sym.Reloc, sectoff int64) bool {
 	ctxt.Out.Write64(uint64(sectoff))
 
-	elfsym := r.Xsym.ElfsymForReloc()
+	elfsym := ld.ElfSymForReloc(ctxt, r.Xsym)
 	switch r.Type {
 	default:
 		return false
@@ -684,7 +684,7 @@ func addgotsym2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s load
 	}
 }
 
-func asmb(ctxt *ld.Link) {
+func asmb(ctxt *ld.Link, _ *loader.Loader) {
 	if ctxt.IsELF {
 		ld.Asmbelfsetup()
 	}
@@ -841,7 +841,7 @@ func asmb2(ctxt *ld.Link) {
 	}
 }
 
-func tlsIEtoLE(s *sym.Symbol, off, size int) {
+func tlsIEtoLE(P []byte, off, size int) {
 	// Transform the PC-relative instruction into a constant load.
 	// That is,
 	//
@@ -852,7 +852,7 @@ func tlsIEtoLE(s *sym.Symbol, off, size int) {
 	if off < 3 {
 		log.Fatal("R_X86_64_GOTTPOFF reloc not preceded by MOVQ or ADDQ instruction")
 	}
-	op := s.P[off-3 : off]
+	op := P[off-3 : off]
 	reg := op[2] >> 3
 
 	if op[1] == 0x8b || reg == 4 {

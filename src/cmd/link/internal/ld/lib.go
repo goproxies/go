@@ -246,6 +246,7 @@ type Arch struct {
 	// success/failure (a failing value indicates a fatal error).
 	Archreloc func(target *Target, syms *ArchSyms, rel *sym.Reloc, sym *sym.Symbol,
 		offset int64) (relocatedOffset int64, success bool)
+	Archreloc2 func(*Target, *loader.Loader, *ArchSyms, *loader.Reloc2, loader.Sym, int64) (int64, bool)
 	// Archrelocvariant is a second arch-specific hook used for
 	// relocation processing; it handles relocations where r.Type is
 	// insufficient to describe the relocation (r.Variant !=
@@ -265,7 +266,7 @@ type Arch struct {
 	// file. Typically, Asmb writes most of the content (sections and
 	// segments), for which we have computed the size and offset. Asmb2
 	// writes the rest.
-	Asmb  func(*Link)
+	Asmb  func(*Link, *loader.Loader)
 	Asmb2 func(*Link)
 
 	Elfreloc1   func(*Link, *sym.Reloc, int64) bool
@@ -282,7 +283,7 @@ type Arch struct {
 	// This is possible when a TLS IE relocation refers to a local
 	// symbol in an executable, which is typical when internally
 	// linking PIE binaries.
-	TLSIEtoLE func(s *sym.Symbol, off, size int)
+	TLSIEtoLE func(P []byte, off, size int)
 
 	// optional override for assignAddress
 	AssignAddress func(ldr *loader.Loader, sect *sym.Section, n int, s loader.Sym, va uint64, isTramp bool) (*sym.Section, int, uint64)
@@ -2493,7 +2494,7 @@ const (
 	DeletedAutoSym = 'x'
 )
 
-func genasmsym(ctxt *Link, put func(*Link, *sym.Symbol, string, SymbolType, int64, *sym.Symbol)) {
+func genasmsym(ctxt *Link, put func(*Link, *sym.Symbol, string, SymbolType, int64)) {
 	// These symbols won't show up in the first loop below because we
 	// skip sym.STEXT symbols. Normal sym.STEXT symbols are emitted by walking textp.
 	s := ctxt.Syms.Lookup("runtime.text", 0)
@@ -2503,7 +2504,7 @@ func genasmsym(ctxt *Link, put func(*Link, *sym.Symbol, string, SymbolType, int6
 		// on AIX with external linker.
 		// See data.go:/textaddress
 		if !(ctxt.DynlinkingGo() && ctxt.HeadType == objabi.Hdarwin) && !(ctxt.HeadType == objabi.Haix && ctxt.LinkMode == LinkExternal) {
-			put(ctxt, s, s.Name, TextSym, s.Value, nil)
+			put(ctxt, s, s.Name, TextSym, s.Value)
 		}
 	}
 
@@ -2524,7 +2525,7 @@ func genasmsym(ctxt *Link, put func(*Link, *sym.Symbol, string, SymbolType, int6
 			break
 		}
 		if s.Type == sym.STEXT {
-			put(ctxt, s, s.Name, TextSym, s.Value, nil)
+			put(ctxt, s, s.Name, TextSym, s.Value)
 		}
 		n++
 	}
@@ -2536,7 +2537,7 @@ func genasmsym(ctxt *Link, put func(*Link, *sym.Symbol, string, SymbolType, int6
 		// on AIX with external linker.
 		// See data.go:/textaddress
 		if !(ctxt.DynlinkingGo() && ctxt.HeadType == objabi.Hdarwin) && !(ctxt.HeadType == objabi.Haix && ctxt.LinkMode == LinkExternal) {
-			put(ctxt, s, s.Name, TextSym, s.Value, nil)
+			put(ctxt, s, s.Name, TextSym, s.Value)
 		}
 	}
 
@@ -2589,7 +2590,7 @@ func genasmsym(ctxt *Link, put func(*Link, *sym.Symbol, string, SymbolType, int6
 			if !s.Attr.Reachable() {
 				continue
 			}
-			put(ctxt, s, s.Name, DataSym, Symaddr(s), s.Gotype)
+			put(ctxt, s, s.Name, DataSym, Symaddr(s))
 
 		case sym.SBSS, sym.SNOPTRBSS, sym.SLIBFUZZER_EXTRA_COUNTER:
 			if !s.Attr.Reachable() {
@@ -2598,11 +2599,11 @@ func genasmsym(ctxt *Link, put func(*Link, *sym.Symbol, string, SymbolType, int6
 			if len(s.P) > 0 {
 				Errorf(s, "should not be bss (size=%d type=%v special=%v)", len(s.P), s.Type, s.Attr.Special())
 			}
-			put(ctxt, s, s.Name, BSSSym, Symaddr(s), s.Gotype)
+			put(ctxt, s, s.Name, BSSSym, Symaddr(s))
 
 		case sym.SUNDEFEXT:
 			if ctxt.HeadType == objabi.Hwindows || ctxt.HeadType == objabi.Haix || ctxt.IsELF {
-				put(ctxt, s, s.Name, UndefinedSym, s.Value, nil)
+				put(ctxt, s, s.Name, UndefinedSym, s.Value)
 			}
 
 		case sym.SHOSTOBJ:
@@ -2610,24 +2611,24 @@ func genasmsym(ctxt *Link, put func(*Link, *sym.Symbol, string, SymbolType, int6
 				continue
 			}
 			if ctxt.HeadType == objabi.Hwindows || ctxt.IsELF {
-				put(ctxt, s, s.Name, UndefinedSym, s.Value, nil)
+				put(ctxt, s, s.Name, UndefinedSym, s.Value)
 			}
 
 		case sym.SDYNIMPORT:
 			if !s.Attr.Reachable() {
 				continue
 			}
-			put(ctxt, s, s.Extname(), UndefinedSym, 0, nil)
+			put(ctxt, s, s.Extname(), UndefinedSym, 0)
 
 		case sym.STLSBSS:
 			if ctxt.LinkMode == LinkExternal {
-				put(ctxt, s, s.Name, TLSSym, Symaddr(s), s.Gotype)
+				put(ctxt, s, s.Name, TLSSym, Symaddr(s))
 			}
 		}
 	}
 
 	for _, s := range ctxt.Textp {
-		put(ctxt, s, s.Name, TextSym, s.Value, s.Gotype)
+		put(ctxt, s, s.Name, TextSym, s.Value)
 	}
 
 	if ctxt.Debugvlog != 0 || *flagN {
@@ -2824,10 +2825,9 @@ func addToTextp(ctxt *Link) {
 	ctxt.Textp = textp
 }
 
-func (ctxt *Link) loadlibfull() {
-
+func (ctxt *Link) loadlibfull(symGroupType []sym.SymKind, needReloc bool) {
 	// Load full symbol contents, resolve indexed references.
-	ctxt.loader.LoadFull(ctxt.Arch, ctxt.Syms)
+	ctxt.loader.LoadFull(ctxt.Arch, ctxt.Syms, needReloc)
 
 	// Convert ctxt.Moduledata2 to ctxt.Moduledata, etc
 	if ctxt.Moduledata2 != 0 {
@@ -2890,10 +2890,42 @@ func (ctxt *Link) loadlibfull() {
 		}
 	}
 
+	// For now, overwrite symbol type with its "group" type, as dodata
+	// expected. Once we converted dodata, this will probably not be
+	// needed.
+	for i, t := range symGroupType {
+		if t != sym.Sxxx {
+			s := ctxt.loader.Syms[i]
+			if s == nil {
+				continue // in dwarfcompress we drop compressed DWARF symbols
+			}
+			s.Type = t
+		}
+	}
+	symGroupType = nil
+
 	if ctxt.Debugvlog > 1 {
 		// loadlibfull is likely a good place to dump.
 		// Only dump under -v=2 and above.
 		ctxt.dumpsyms()
+	}
+}
+
+func symPkg(ctxt *Link, s *sym.Symbol) string {
+	if s == nil {
+		return ""
+	}
+	return ctxt.loader.SymPkg(loader.Sym(s.SymIdx))
+}
+
+func ElfSymForReloc(ctxt *Link, s *sym.Symbol) int32 {
+	// If putelfsym created a local version of this symbol, use that in all
+	// relocations.
+	les := ctxt.loader.SymLocalElfSym(loader.Sym(s.SymIdx))
+	if les != 0 {
+		return les
+	} else {
+		return ctxt.loader.SymElfSym(loader.Sym(s.SymIdx))
 	}
 }
 

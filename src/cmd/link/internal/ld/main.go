@@ -300,8 +300,6 @@ func Main(arch *sys.Arch, theArch Arch) {
 	symGroupType := ctxt.symtab()
 	bench.Start("dodata")
 	ctxt.dodata2(symGroupType)
-	bench.Start("loadlibfull")
-	ctxt.loadlibfull() // XXX do it here for now
 	bench.Start("address")
 	order := ctxt.address()
 	bench.Start("dwarfcompress")
@@ -325,9 +323,24 @@ func Main(arch *sys.Arch, theArch Arch) {
 	// Asmb will redirect symbols to the output file mmap, and relocations
 	// will be applied directly there.
 	bench.Start("Asmb")
-	thearch.Asmb(ctxt)
-	bench.Start("reloc")
-	ctxt.reloc()
+	ctxt.loader.InitOutData()
+	thearch.Asmb(ctxt, ctxt.loader)
+
+	newreloc := ctxt.IsInternal() && (ctxt.IsAMD64() || ctxt.Is386())
+	if newreloc {
+		bench.Start("reloc")
+		ctxt.reloc()
+		bench.Start("loadlibfull")
+		// We don't need relocations at this point.
+		// An exception is Windows, see pe.go:addPEBaseRelocSym
+		needReloc := ctxt.IsWindows()
+		ctxt.loadlibfull(symGroupType, needReloc) // XXX do it here for now
+	} else {
+		bench.Start("loadlibfull")
+		ctxt.loadlibfull(symGroupType, true) // XXX do it here for now
+		bench.Start("reloc")
+		ctxt.reloc2()
+	}
 	bench.Start("Asmb2")
 	thearch.Asmb2(ctxt)
 
