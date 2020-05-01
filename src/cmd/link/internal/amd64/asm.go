@@ -78,7 +78,7 @@ func makeWritable(s *sym.Symbol) {
 	}
 }
 
-func adddynrel2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r *loader.Reloc2, rIdx int) bool {
+func adddynrel2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc2, rIdx int) bool {
 	targ := r.Sym()
 	var targType sym.SymKind
 	if targ != 0 {
@@ -242,7 +242,7 @@ func adddynrel2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s load
 
 	// Reread the reloc to incorporate any changes in type above.
 	relocs := ldr.Relocs(s)
-	*r = relocs.At2(rIdx)
+	r = relocs.At2(rIdx)
 
 	switch r.Type() {
 	case objabi.R_CALL,
@@ -400,7 +400,7 @@ func elfreloc1(ctxt *ld.Link, r *sym.Reloc, sectoff int64) bool {
 	switch r.Type {
 	default:
 		return false
-	case objabi.R_ADDR:
+	case objabi.R_ADDR, objabi.R_DWARFSECREF:
 		if r.Siz == 4 {
 			ctxt.Out.Write64(uint64(elf.R_X86_64_32) | uint64(elfsym)<<32)
 		} else if r.Siz == 8 {

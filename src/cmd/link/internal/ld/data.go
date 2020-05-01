@@ -150,27 +150,33 @@ func foldSubSymbolOffset(ldr *loader.Loader, s loader.Sym) (loader.Sym, int64) {
 //
 // This is a performance-critical function for the linker; be careful
 // to avoid introducing unnecessary allocations in the main loop.
-func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *ArchSyms, s loader.Sym, P []byte) {
+func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
+	ldr := st.ldr
 	relocs := ldr.Relocs(s)
 	if relocs.Count() == 0 {
 		return
 	}
+	target := st.target
+	syms := st.syms
 	var extRelocs []loader.ExtReloc
+	if target.IsExternal() {
+		// preallocate a slice conservatively assuming that all
+		// relocs will require an external reloc
+		extRelocs = st.preallocExtRelocSlice(relocs.Count())
+	}
 	for ri := 0; ri < relocs.Count(); ri++ {
 		r := relocs.At2(ri)
 		off := r.Off()
 		siz := int32(r.Siz())
 		rs := r.Sym()
-		if rs != 0 {
-			rs = ldr.ResolveABIAlias(rs)
-		}
+		rs = ldr.ResolveABIAlias(rs)
 		rt := r.Type()
 		if off < 0 || off+siz > int32(len(P)) {
 			rname := ""
 			if rs != 0 {
 				rname = ldr.SymName(rs)
 			}
-			err.Errorf(s, "invalid relocation %s: %d+%d not in [%d,%d)", rname, off, siz, 0, len(P))
+			st.err.Errorf(s, "invalid relocation %s: %d+%d not in [%d,%d)", rname, off, siz, 0, len(P))
 			continue
 		}
 
@@ -192,7 +198,7 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 					continue
 				}
 			} else {
-				err.errorUnresolved(ldr, s, rs)
+				st.err.errorUnresolved(ldr, s, rs)
 				continue
 			}
 		}
@@ -208,21 +214,17 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 		// shared libraries, and Solaris, Darwin and AIX need it always
 		if !target.IsSolaris() && !target.IsDarwin() && !target.IsAIX() && rs != 0 && rst == sym.SDYNIMPORT && !target.IsDynlinkingGo() && !ldr.AttrSubSymbol(rs) {
 			if !(target.IsPPC64() && target.IsExternal() && ldr.SymName(rs) == ".TOC.") {
-				err.Errorf(s, "unhandled relocation for %s (type %d (%s) rtype %d (%s))", ldr.SymName(rs), rst, rst, rt, sym.RelocName(target.Arch, rt))
+				st.err.Errorf(s, "unhandled relocation for %s (type %d (%s) rtype %d (%s))", ldr.SymName(rs), rst, rst, rt, sym.RelocName(target.Arch, rt))
 			}
 		}
 		if rs != 0 && rst != sym.STLSBSS && rt != objabi.R_WEAKADDROFF && rt != objabi.R_METHODOFF && !ldr.AttrReachable(rs) {
-			err.Errorf(s, "unreachable sym in relocation: %s", ldr.SymName(rs))
+			st.err.Errorf(s, "unreachable sym in relocation: %s", ldr.SymName(rs))
 		}
 
 		var rr loader.ExtReloc
 		needExtReloc := false // will set to true below in case it is needed
 		if target.IsExternal() {
-			rr.Sym = rs
-			rr.Type = rt
-			rr.Off = off
-			rr.Siz = uint8(siz)
-			rr.Add = r.Add()
+			rr.Idx = ri
 		}
 
 		// TODO(mundaym): remove this special case - see issue 14218.
@@ -243,7 +245,7 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 		default:
 			switch siz {
 			default:
-				err.Errorf(s, "bad reloc size %#x for %s", uint32(siz), ldr.SymName(rs))
+				st.err.Errorf(s, "bad reloc size %#x for %s", uint32(siz), ldr.SymName(rs))
 			case 1:
 				o = int64(P[off])
 			case 2:
@@ -253,25 +255,37 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 			case 8:
 				o = int64(target.Arch.ByteOrder.Uint64(P[off:]))
 			}
-			var out int64
-			var ok bool
-			out, needExtReloc, ok = thearch.Archreloc2(target, ldr, syms, &r, &rr, s, o)
+			var rp *loader.ExtReloc
+			if target.IsExternal() {
+				// Don't pass &rr directly to Archreloc2, which will escape rr
+				// even if this case is not taken. Instead, as Archreloc2 will
+				// likely return true, we speculatively add rr to extRelocs
+				// and use that space to pass to Archreloc2.
+				extRelocs = append(extRelocs, rr)
+				rp = &extRelocs[len(extRelocs)-1]
+			}
+			out, needExtReloc1, ok := thearch.Archreloc2(target, ldr, syms, r, rp, s, o)
+			if target.IsExternal() && !needExtReloc1 {
+				// Speculation failed. Undo the append.
+				extRelocs = extRelocs[:len(extRelocs)-1]
+			}
+			needExtReloc = false // already appended
 			if ok {
 				o = out
 			} else {
-				err.Errorf(s, "unknown reloc to %v: %d (%s)", ldr.SymName(rs), rt, sym.RelocName(target.Arch, rt))
+				st.err.Errorf(s, "unknown reloc to %v: %d (%s)", ldr.SymName(rs), rt, sym.RelocName(target.Arch, rt))
 			}
 		case objabi.R_TLS_LE:
 			if target.IsExternal() && target.IsElf() {
 				needExtReloc = true
-				if rr.Sym == 0 {
-					rr.Sym = syms.Tlsg2
+				rr.Xsym = rs
+				if rr.Xsym == 0 {
+					rr.Xsym = syms.Tlsg2
 				}
-				rr.Xsym = rr.Sym
-				rr.Xadd = rr.Add
+				rr.Xadd = r.Add()
 				o = 0
 				if !target.IsAMD64() {
-					o = rr.Add
+					o = r.Add()
 				}
 				break
 			}
@@ -295,14 +309,14 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 		case objabi.R_TLS_IE:
 			if target.IsExternal() && target.IsElf() {
 				needExtReloc = true
-				if rr.Sym == 0 {
-					rr.Sym = syms.Tlsg2
+				rr.Xsym = rs
+				if rr.Xsym == 0 {
+					rr.Xsym = syms.Tlsg2
 				}
-				rr.Xsym = rr.Sym
-				rr.Xadd = rr.Add
+				rr.Xadd = r.Add()
 				o = 0
 				if !target.IsAMD64() {
-					o = rr.Add
+					o = r.Add()
 				}
 				break
 			}
@@ -324,10 +338,10 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 				// set up addend for eventual relocation via outer symbol.
 				rs := rs
 				rs, off := foldSubSymbolOffset(ldr, rs)
-				rr.Xadd = rr.Add + off
+				rr.Xadd = r.Add() + off
 				rst := ldr.SymType(rs)
 				if rst != sym.SHOSTOBJ && rst != sym.SDYNIMPORT && rst != sym.SUNDEFEXT && ldr.SymSect(rs) == nil {
-					err.Errorf(s, "missing section for relocation target %s", ldr.SymName(rs))
+					st.err.Errorf(s, "missing section for relocation target %s", ldr.SymName(rs))
 				}
 				rr.Xsym = rs
 
@@ -343,9 +357,9 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 				} else if target.IsWindows() {
 					// nothing to do
 				} else if target.IsAIX() {
-					o = ldr.SymValue(rr.Sym) + rr.Add
+					o = ldr.SymValue(rs) + r.Add()
 				} else {
-					err.Errorf(s, "unhandled pcrel relocation to %s on %v", ldr.SymName(rs), target.HeadType)
+					st.err.Errorf(s, "unhandled pcrel relocation to %s on %v", ldr.SymName(rs), target.HeadType)
 				}
 
 				break
@@ -375,12 +389,12 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 			// Instead of special casing only amd64, we treat this as an error on all
 			// 64-bit architectures so as to be future-proof.
 			if int32(o) < 0 && target.Arch.PtrSize > 4 && siz == 4 {
-				err.Errorf(s, "non-pc-relative relocation address for %s is too big: %#x (%#x + %#x)", ldr.SymName(rs), uint64(o), ldr.SymValue(rs), r.Add())
+				st.err.Errorf(s, "non-pc-relative relocation address for %s is too big: %#x (%#x + %#x)", ldr.SymName(rs), uint64(o), ldr.SymValue(rs), r.Add())
 				errorexit()
 			}
 		case objabi.R_DWARFSECREF:
 			if ldr.SymSect(rs) == nil {
-				err.Errorf(s, "missing DWARF section for relocation target %s", ldr.SymName(rs))
+				st.err.Errorf(s, "missing DWARF section for relocation target %s", ldr.SymName(rs))
 			}
 
 			if target.IsExternal() {
@@ -395,17 +409,8 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 					needExtReloc = false
 				}
 
-				// PE code emits IMAGE_REL_I386_SECREL and IMAGE_REL_AMD64_SECREL
-				// for R_DWARFSECREF relocations, while R_ADDR is replaced with
-				// IMAGE_REL_I386_DIR32, IMAGE_REL_AMD64_ADDR64 and IMAGE_REL_AMD64_ADDR32.
-				// Do not replace R_DWARFSECREF with R_ADDR for windows -
-				// let PE code emit correct relocations.
-				if !target.IsWindows() {
-					rr.Type = objabi.R_ADDR
-				}
-
-				rr.Xsym = loader.Sym(ldr.SymSect(rr.Sym).Sym2)
-				rr.Xadd = rr.Add + ldr.SymValue(rr.Sym) - int64(ldr.SymSect(rr.Sym).Vaddr)
+				rr.Xsym = loader.Sym(ldr.SymSect(rs).Sym2)
+				rr.Xadd = r.Add() + ldr.SymValue(rs) - int64(ldr.SymSect(rs).Vaddr)
 
 				o = rr.Xadd
 				if target.IsElf() && target.IsAMD64() {
@@ -437,12 +442,12 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 		case objabi.R_GOTPCREL:
 			if target.IsDynlinkingGo() && target.IsDarwin() && rs != 0 && rst != sym.SCONST {
 				needExtReloc = true
-				rr.Xadd = rr.Add
-				rr.Xadd -= int64(rr.Siz) // relative to address after the relocated chunk
-				rr.Xsym = rr.Sym
+				rr.Xadd = r.Add()
+				rr.Xadd -= int64(siz) // relative to address after the relocated chunk
+				rr.Xsym = rs
 
 				o = rr.Xadd
-				o += int64(rr.Siz)
+				o += int64(siz)
 				break
 			}
 			fallthrough
@@ -452,9 +457,9 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 				needExtReloc = true
 				rr.Xadd = 0
 				if target.IsElf() {
-					rr.Xadd -= int64(rr.Siz)
+					rr.Xadd -= int64(siz)
 				}
-				rr.Xsym = rr.Sym
+				rr.Xsym = rs
 				o = 0
 				break
 			}
@@ -464,11 +469,11 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 				// set up addend for eventual relocation via outer symbol.
 				rs := rs
 				rs, off := foldSubSymbolOffset(ldr, rs)
-				rr.Xadd = rr.Add + off
-				rr.Xadd -= int64(rr.Siz) // relative to address after the relocated chunk
+				rr.Xadd = r.Add() + off
+				rr.Xadd -= int64(siz) // relative to address after the relocated chunk
 				rst := ldr.SymType(rs)
 				if rst != sym.SHOSTOBJ && rst != sym.SDYNIMPORT && ldr.SymSect(rs) == nil {
-					err.Errorf(s, "missing section for relocation target %s", ldr.SymName(rs))
+					st.err.Errorf(s, "missing section for relocation target %s", ldr.SymName(rs))
 				}
 				rr.Xsym = rs
 
@@ -478,27 +483,27 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 						o = 0
 					}
 				} else if target.IsDarwin() {
-					if rr.Type == objabi.R_CALL {
+					if rt == objabi.R_CALL {
 						if target.IsExternal() && rst == sym.SDYNIMPORT {
 							if target.IsAMD64() {
 								// AMD64 dynamic relocations are relative to the end of the relocation.
-								o += int64(rr.Siz)
+								o += int64(siz)
 							}
 						} else {
 							if rst != sym.SHOSTOBJ {
 								o += int64(uint64(ldr.SymValue(rs)) - ldr.SymSect(rs).Vaddr)
 							}
-							o -= int64(rr.Off) // relative to section offset, not symbol
+							o -= int64(off) // relative to section offset, not symbol
 						}
 					} else {
-						o += int64(rr.Siz)
+						o += int64(siz)
 					}
 				} else if target.IsWindows() && target.IsAMD64() { // only amd64 needs PCREL
 					// PE/COFF's PC32 relocation uses the address after the relocated
 					// bytes as the base. Compensate by skewing the addend.
-					o += int64(rr.Siz)
+					o += int64(siz)
 				} else {
-					err.Errorf(s, "unhandled pcrel relocation to %s on %v", ldr.SymName(rs), target.HeadType)
+					st.err.Errorf(s, "unhandled pcrel relocation to %s on %v", ldr.SymName(rs), target.HeadType)
 				}
 
 				break
@@ -515,14 +520,14 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 
 		case objabi.R_XCOFFREF:
 			if !target.IsAIX() {
-				err.Errorf(s, "find XCOFF R_REF on non-XCOFF files")
+				st.err.Errorf(s, "find XCOFF R_REF on non-XCOFF files")
 			}
 			if !target.IsExternal() {
-				err.Errorf(s, "find XCOFF R_REF with internal linking")
+				st.err.Errorf(s, "find XCOFF R_REF with internal linking")
 			}
 			needExtReloc = true
-			rr.Xsym = rr.Sym
-			rr.Xadd = rr.Add
+			rr.Xsym = rs
+			rr.Xadd = r.Add()
 
 			// This isn't a real relocation so it must not update
 			// its offset value.
@@ -548,22 +553,22 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 
 		switch siz {
 		default:
-			err.Errorf(s, "bad reloc size %#x for %s", uint32(siz), ldr.SymName(rs))
+			st.err.Errorf(s, "bad reloc size %#x for %s", uint32(siz), ldr.SymName(rs))
 		case 1:
 			P[off] = byte(int8(o))
 		case 2:
 			if o != int64(int16(o)) {
-				err.Errorf(s, "relocation address for %s is too big: %#x", ldr.SymName(rs), o)
+				st.err.Errorf(s, "relocation address for %s is too big: %#x", ldr.SymName(rs), o)
 			}
 			target.Arch.ByteOrder.PutUint16(P[off:], uint16(o))
 		case 4:
 			if rt == objabi.R_PCREL || rt == objabi.R_CALL {
 				if o != int64(int32(o)) {
-					err.Errorf(s, "pc-relative relocation address for %s is too big: %#x", ldr.SymName(rs), o)
+					st.err.Errorf(s, "pc-relative relocation address for %s is too big: %#x", ldr.SymName(rs), o)
 				}
 			} else {
 				if o != int64(int32(o)) && o != int64(uint32(o)) {
-					err.Errorf(s, "non-pc-relative relocation address for %s is too big: %#x", ldr.SymName(rs), uint64(o))
+					st.err.Errorf(s, "non-pc-relative relocation address for %s is too big: %#x", ldr.SymName(rs), uint64(o))
 				}
 			}
 			target.Arch.ByteOrder.PutUint32(P[off:], uint32(o))
@@ -576,38 +581,95 @@ func relocsym(target *Target, ldr *loader.Loader, err *ErrorReporter, syms *Arch
 		}
 	}
 	if len(extRelocs) != 0 {
+		st.finalizeExtRelocSlice(extRelocs)
 		ldr.SetExtRelocs(s, extRelocs)
+	}
+}
+
+const extRelocSlabSize = 2048
+
+// relocSymState hold state information needed when making a series of
+// successive calls to relocsym(). The items here are invariant
+// (meaning that they are set up once initially and then don't change
+// during the execution of relocsym), with the exception of a slice
+// used to facilitate batch allocation of external relocations. Calls
+// to relocsym happen in parallel; the assumption is that each
+// parallel thread will have its own state object.
+type relocSymState struct {
+	target *Target
+	ldr    *loader.Loader
+	err    *ErrorReporter
+	syms   *ArchSyms
+	batch  []loader.ExtReloc
+}
+
+// preallocExtRelocs returns a subslice from an internally allocated
+// slab owned by the state object. Client requests a slice of size
+// 'sz', however it may be that fewer relocs are needed; the
+// assumption is that the final size is set in a [required] subsequent
+// call to 'finalizeExtRelocSlice'.
+func (st *relocSymState) preallocExtRelocSlice(sz int) []loader.ExtReloc {
+	if len(st.batch) < sz {
+		slabSize := extRelocSlabSize
+		if sz > extRelocSlabSize {
+			slabSize = sz
+		}
+		st.batch = make([]loader.ExtReloc, slabSize)
+	}
+	rval := st.batch[:sz:sz]
+	return rval[:0]
+}
+
+// finalizeExtRelocSlice takes a slice returned from preallocExtRelocSlice,
+// from which it determines how many of the pre-allocated relocs were
+// actually needed; it then carves that number off the batch slice.
+func (st *relocSymState) finalizeExtRelocSlice(finalsl []loader.ExtReloc) {
+	if &st.batch[0] != &finalsl[0] {
+		panic("preallocExtRelocSlice size invariant violation")
+	}
+	st.batch = st.batch[len(finalsl):]
+}
+
+// makeRelocSymState creates a relocSymState container object to
+// pass to relocsym(). If relocsym() calls happen in parallel,
+// each parallel thread should have its own state object.
+func (ctxt *Link) makeRelocSymState() *relocSymState {
+	return &relocSymState{
+		target: &ctxt.Target,
+		ldr:    ctxt.loader,
+		err:    &ctxt.ErrorReporter,
+		syms:   &ctxt.ArchSyms,
 	}
 }
 
 func (ctxt *Link) reloc() {
 	var wg sync.WaitGroup
-	target := &ctxt.Target
 	ldr := ctxt.loader
-	reporter := &ctxt.ErrorReporter
-	syms := &ctxt.ArchSyms
 	if ctxt.IsExternal() {
 		ldr.InitExtRelocs()
 	}
 	wg.Add(3)
 	go func() {
 		if !ctxt.IsWasm() { // On Wasm, text relocations are applied in Asmb2.
+			st := ctxt.makeRelocSymState()
 			for _, s := range ctxt.Textp2 {
-				relocsym(target, ldr, reporter, syms, s, ldr.OutData(s))
+				st.relocsym(s, ldr.OutData(s))
 			}
 		}
 		wg.Done()
 	}()
 	go func() {
+		st := ctxt.makeRelocSymState()
 		for _, s := range ctxt.datap2 {
-			relocsym(target, ldr, reporter, syms, s, ldr.OutData(s))
+			st.relocsym(s, ldr.OutData(s))
 		}
 		wg.Done()
 	}()
 	go func() {
+		st := ctxt.makeRelocSymState()
 		for _, si := range dwarfp2 {
 			for _, s := range si.syms {
-				relocsym(target, ldr, reporter, syms, s, ldr.OutData(s))
+				st.relocsym(s, ldr.OutData(s))
 			}
 		}
 		wg.Done()
@@ -702,7 +764,7 @@ func dynrelocsym2(ctxt *Link, s loader.Sym) {
 			// It's expected that some relocations will be done
 			// later by relocsym (R_TLS_LE, R_ADDROFF), so
 			// don't worry if Adddynrel returns false.
-			thearch.Adddynrel2(target, ldr, syms, s, &r, ri)
+			thearch.Adddynrel2(target, ldr, syms, s, r, ri)
 			continue
 		}
 
@@ -711,7 +773,7 @@ func dynrelocsym2(ctxt *Link, s loader.Sym) {
 			if rSym != 0 && !ldr.AttrReachable(rSym) {
 				ctxt.Errorf(s, "dynamic relocation to unreachable symbol %s", ldr.SymName(rSym))
 			}
-			if !thearch.Adddynrel2(target, ldr, syms, s, &r, ri) {
+			if !thearch.Adddynrel2(target, ldr, syms, s, r, ri) {
 				ctxt.Errorf(s, "unsupported dynamic relocation for symbol %s (type=%d (%s) stype=%d (%s))", ldr.SymName(rSym), r.Type(), sym.RelocName(ctxt.Arch, r.Type()), ldr.SymType(rSym), ldr.SymType(rSym))
 			}
 		}
@@ -1123,7 +1185,7 @@ func (p *GCProg2) AddSym(s loader.Sym) {
 	sval := ldr.SymValue(s)
 	if decodetypeUsegcprog(p.ctxt.Arch, typData) == 0 {
 		// Copy pointers from mask into program.
-		mask := decodetypeGcmask2(p.ctxt, typ)
+		mask := decodetypeGcmask(p.ctxt, typ)
 		for i := int64(0); i < nptr; i++ {
 			if (mask[i/8]>>uint(i%8))&1 != 0 {
 				p.w.Ptr(sval/ptrsize + i)
@@ -1133,7 +1195,7 @@ func (p *GCProg2) AddSym(s loader.Sym) {
 	}
 
 	// Copy program.
-	prog := decodetypeGcprog2(p.ctxt, typ)
+	prog := decodetypeGcprog(p.ctxt, typ)
 	p.w.ZeroUntil(sval / ptrsize)
 	p.w.Append(prog[4:], nptr)
 }
@@ -1869,6 +1931,11 @@ func (state *dodataState) allocateDataSections2(ctxt *Link) {
 		Errorf(nil, "read-only data segment too large: %d", state.datsize)
 	}
 
+	siz := 0
+	for symn := sym.SELFRXSECT; symn < sym.SXREF; symn++ {
+		siz += len(state.data2[symn])
+	}
+	ctxt.datap2 = make([]loader.Sym, 0, siz)
 	for symn := sym.SELFRXSECT; symn < sym.SXREF; symn++ {
 		ctxt.datap2 = append(ctxt.datap2, state.data2[symn]...)
 	}
@@ -1909,11 +1976,19 @@ func (state *dodataState) allocateDwarfSections2(ctxt *Link) {
 	}
 }
 
+type symNameSize struct {
+	name string
+	sz   int64
+	sym  loader.Sym
+}
+
 func (state *dodataState) dodataSect2(ctxt *Link, symn sym.SymKind, syms []loader.Sym) (result []loader.Sym, maxAlign int32) {
 	var head, tail loader.Sym
 	ldr := ctxt.loader
-	for _, s := range syms {
+	sl := make([]symNameSize, len(syms))
+	for k, s := range syms {
 		ss := ldr.SymSize(s)
+		sl[k] = symNameSize{name: ldr.SymName(s), sz: ss, sym: s}
 		ds := int64(len(ldr.Data(s)))
 		switch {
 		case ss < ds:
@@ -1946,8 +2021,8 @@ func (state *dodataState) dodataSect2(ctxt *Link, symn sym.SymKind, syms []loade
 	checkSize := symn != sym.SELFGOT
 
 	// Perform the sort.
-	sort.Slice(syms, func(i, j int) bool {
-		si, sj := syms[i], syms[j]
+	sort.Slice(sl, func(i, j int) bool {
+		si, sj := sl[i].sym, sl[j].sym
 		switch {
 		case si == head, sj == tail:
 			return true
@@ -1955,29 +2030,31 @@ func (state *dodataState) dodataSect2(ctxt *Link, symn sym.SymKind, syms []loade
 			return false
 		}
 		if checkSize {
-			isz := ldr.SymSize(si)
-			jsz := ldr.SymSize(sj)
+			isz := sl[i].sz
+			jsz := sl[j].sz
 			if isz != jsz {
 				return isz < jsz
 			}
 		}
-		iname := ldr.SymName(si)
-		jname := ldr.SymName(sj)
+		iname := sl[i].name
+		jname := sl[j].name
 		if iname != jname {
 			return iname < jname
 		}
 		return si < sj
 	})
 
-	// Reap alignment.
-	for k := range syms {
-		s := syms[k]
+	// Reap alignment, construct result
+	syms = syms[:0]
+	for k := range sl {
+		s := sl[k].sym
 		if s != head && s != tail {
 			align := state.symalign2(s)
 			if maxAlign < align {
 				maxAlign = align
 			}
 		}
+		syms = append(syms, s)
 	}
 
 	return syms, maxAlign
@@ -2513,9 +2590,7 @@ func compressSyms(ctxt *Link, syms []loader.Sym) []byte {
 	if err != nil {
 		log.Fatalf("NewWriterLevel failed: %s", err)
 	}
-	target := &ctxt.Target
-	reporter := &ctxt.ErrorReporter
-	archSyms := &ctxt.ArchSyms
+	st := ctxt.makeRelocSymState()
 	for _, s := range syms {
 		// Symbol data may be read-only. Apply relocations in a
 		// temporary buffer, and immediately write it out.
@@ -2525,7 +2600,7 @@ func compressSyms(ctxt *Link, syms []loader.Sym) []byte {
 			relocbuf = append(relocbuf[:0], P...)
 			P = relocbuf
 		}
-		relocsym(target, ldr, reporter, archSyms, s, P)
+		st.relocsym(s, P)
 		if _, err := z.Write(P); err != nil {
 			log.Fatalf("compression failed: %s", err)
 		}
