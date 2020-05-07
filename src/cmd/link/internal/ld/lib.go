@@ -277,7 +277,7 @@ type Arch struct {
 	Elfsetupplt func(ctxt *Link, plt, gotplt *loader.SymbolBuilder, dynamic loader.Sym)
 	Gentext     func(*Link)
 	Gentext2    func(*Link, *loader.Loader)
-	Machoreloc1 func(*sys.Arch, *OutBuf, *sym.Symbol, *sym.Reloc, int64) bool
+	Machoreloc1 func(*sys.Arch, *OutBuf, *loader.Loader, loader.Sym, loader.ExtRelocView, int64) bool
 	PEreloc1    func(*sys.Arch, *OutBuf, *sym.Symbol, *sym.Reloc, int64) bool
 	Xcoffreloc1 func(*sys.Arch, *OutBuf, *sym.Symbol, *sym.Reloc, int64) bool
 
@@ -2692,47 +2692,20 @@ func Entryvalue(ctxt *Link) int64 {
 	return s.Value
 }
 
-func undefsym(ctxt *Link, s *sym.Symbol) {
-	var r *sym.Reloc
-
-	for i := 0; i < len(s.R); i++ {
-		r = &s.R[i]
-		if r.Sym == nil { // happens for some external ARM relocs
-			continue
-		}
-		// TODO(mwhudson): the test of VisibilityHidden here probably doesn't make
-		// sense and should be removed when someone has thought about it properly.
-		if (r.Sym.Type == sym.Sxxx || r.Sym.Type == sym.SXREF) && !r.Sym.Attr.VisibilityHidden() {
-			Errorf(s, "undefined: %q", r.Sym.Name)
-		}
-		if !r.Sym.Attr.Reachable() && r.Type != objabi.R_WEAKADDROFF {
-			Errorf(s, "relocation target %q", r.Sym.Name)
-		}
+func Entryvalue2(ctxt *Link) int64 {
+	a := *flagEntrySymbol
+	if a[0] >= '0' && a[0] <= '9' {
+		return atolwhex(a)
 	}
-}
-
-func (ctxt *Link) undef() {
-	// undefsym performs checks (almost) identical to checks
-	// that report undefined relocations in relocsym.
-	// Both undefsym and relocsym can report same symbol as undefined,
-	// which results in error message duplication (see #10978).
-	//
-	// The undef is run after Arch.Asmb and could detect some
-	// programming errors there, but if object being linked is already
-	// failed with errors, it is better to avoid duplicated errors.
-	if nerrors > 0 {
-		return
+	s := ctxt.loader.Lookup(a, 0)
+	typ := ctxt.loader.SymType(s)
+	if typ == 0 {
+		return *FlagTextAddr
 	}
-
-	for _, s := range ctxt.Textp {
-		undefsym(ctxt, s)
+	if ctxt.HeadType != objabi.Haix && typ != sym.STEXT {
+		ctxt.Errorf(s, "entry not text")
 	}
-	for _, s := range ctxt.datap {
-		undefsym(ctxt, s)
-	}
-	if nerrors > 0 {
-		errorexit()
-	}
+	return ctxt.loader.SymValue(s)
 }
 
 func (ctxt *Link) callgraph() {
