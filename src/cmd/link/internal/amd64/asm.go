@@ -522,20 +522,21 @@ func machoreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sy
 	return true
 }
 
-func pereloc1(arch *sys.Arch, out *ld.OutBuf, s *sym.Symbol, r *sym.Reloc, sectoff int64) bool {
+func pereloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
 	var v uint32
 
 	rs := r.Xsym
+	rt := r.Type()
 
-	if rs.Dynid < 0 {
-		ld.Errorf(s, "reloc %d (%s) to non-coff symbol %s type=%d (%s)", r.Type, sym.RelocName(arch, r.Type), rs.Name, rs.Type, rs.Type)
+	if ldr.SymDynid(rs) < 0 {
+		ldr.Errorf(s, "reloc %d (%s) to non-coff symbol %s type=%d (%s)", rt, sym.RelocName(arch, rt), ldr.SymName(rs), ldr.SymType(rs), ldr.SymType(rs))
 		return false
 	}
 
 	out.Write32(uint32(sectoff))
-	out.Write32(uint32(rs.Dynid))
+	out.Write32(uint32(ldr.SymDynid(rs)))
 
-	switch r.Type {
+	switch rt {
 	default:
 		return false
 
@@ -543,7 +544,7 @@ func pereloc1(arch *sys.Arch, out *ld.OutBuf, s *sym.Symbol, r *sym.Reloc, secto
 		v = ld.IMAGE_REL_AMD64_SECREL
 
 	case objabi.R_ADDR:
-		if r.Siz == 8 {
+		if r.Siz() == 8 {
 			v = ld.IMAGE_REL_AMD64_ADDR64
 		} else {
 			v = ld.IMAGE_REL_AMD64_ADDR32
@@ -559,13 +560,13 @@ func pereloc1(arch *sys.Arch, out *ld.OutBuf, s *sym.Symbol, r *sym.Reloc, secto
 	return true
 }
 
-func archreloc(target *ld.Target, syms *ld.ArchSyms, r *sym.Reloc, s *sym.Symbol, val int64) (int64, bool) {
-	return val, false
+func archreloc(*ld.Target, *loader.Loader, *ld.ArchSyms, loader.Reloc2, *loader.ExtReloc, loader.Sym, int64) (int64, bool, bool) {
+	return -1, false, false
 }
 
-func archrelocvariant(target *ld.Target, syms *ld.ArchSyms, r *sym.Reloc, s *sym.Symbol, t int64) int64 {
+func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc2, sym.RelocVariant, loader.Sym, int64) int64 {
 	log.Fatalf("unexpected relocation variant")
-	return t
+	return -1
 }
 
 func elfsetupplt(ctxt *ld.Link, plt, got *loader.SymbolBuilder, dynamic loader.Sym) {

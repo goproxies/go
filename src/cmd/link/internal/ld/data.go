@@ -272,14 +272,14 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			}
 			var rp *loader.ExtReloc
 			if target.IsExternal() {
-				// Don't pass &rr directly to Archreloc2, which will escape rr
+				// Don't pass &rr directly to Archreloc, which will escape rr
 				// even if this case is not taken. Instead, as Archreloc2 will
 				// likely return true, we speculatively add rr to extRelocs
-				// and use that space to pass to Archreloc2.
+				// and use that space to pass to Archreloc.
 				extRelocs = append(extRelocs, rr)
 				rp = &extRelocs[len(extRelocs)-1]
 			}
-			out, needExtReloc1, ok := thearch.Archreloc2(target, ldr, syms, r, rp, s, o)
+			out, needExtReloc1, ok := thearch.Archreloc(target, ldr, syms, r, rp, s, o)
 			if target.IsExternal() && !needExtReloc1 {
 				// Speculation failed. Undo the append.
 				extRelocs = extRelocs[:len(extRelocs)-1]
@@ -372,7 +372,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 				} else if target.IsWindows() {
 					// nothing to do
 				} else if target.IsAIX() {
-					o = ldr.SymValue(rs) + r.Add()
+					o = ldr.SymValue(rs) + rr.Xadd
 				} else {
 					st.err.Errorf(s, "unhandled pcrel relocation to %s on %v", ldr.SymName(rs), target.HeadType)
 				}
@@ -391,8 +391,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 				// symbol which isn't in .data. However, as .text has the
 				// same address once loaded, this is possible.
 				if ldr.SymSect(s).Seg == &Segdata {
-					panic("not implemented")
-					//Xcoffadddynrel(target, ldr, err, s, &r) // XXX
+					Xcoffadddynrel2(target, ldr, syms, s, r, ri)
 				}
 			}
 
@@ -543,10 +542,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			needExtReloc = true
 			rr.Xsym = rs
 			rr.Xadd = r.Add()
-
-			// This isn't a real relocation so it must not update
-			// its offset value.
-			continue
+			goto addExtReloc
 
 		case objabi.R_DWARFFILEREF:
 			// We don't renumber files in dwarf.go:writelines anymore.
@@ -561,7 +557,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 
 		if target.IsPPC64() || target.IsS390X() {
 			if rv != sym.RV_NONE {
-				o = thearch.Archrelocvariant2(target, ldr, r, rv, s, o)
+				o = thearch.Archrelocvariant(target, ldr, r, rv, s, o)
 			}
 		}
 
@@ -590,6 +586,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			target.Arch.ByteOrder.PutUint64(P[off:], uint64(o))
 		}
 
+	addExtReloc:
 		if needExtReloc {
 			extRelocs = append(extRelocs, rr)
 		}
@@ -2191,7 +2188,7 @@ func (ctxt *Link) textaddress() {
 
 	// merge tramps into Textp, keeping Textp in address order
 	if ntramps != 0 {
-		newtextp := make([]loader.Sym, 0, len(ctxt.Textp)+ntramps)
+		newtextp := make([]loader.Sym, 0, len(ctxt.Textp2)+ntramps)
 		i := 0
 		for _, s := range ctxt.Textp2 {
 			for ; i < ntramps && ldr.SymValue(ctxt.tramps[i]) < ldr.SymValue(s); i++ {
