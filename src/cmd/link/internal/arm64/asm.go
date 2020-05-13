@@ -325,15 +325,16 @@ func adddynrel2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s load
 	return false
 }
 
-func elfreloc1(ctxt *ld.Link, r *sym.Reloc, sectoff int64) bool {
+func elfreloc2(ctxt *ld.Link, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
 	ctxt.Out.Write64(uint64(sectoff))
 
-	elfsym := ld.ElfSymForReloc(ctxt, r.Xsym)
-	switch r.Type {
+	elfsym := ld.ElfSymForReloc2(ctxt, r.Xsym)
+	siz := r.Siz()
+	switch r.Type() {
 	default:
 		return false
 	case objabi.R_ADDR, objabi.R_DWARFSECREF:
-		switch r.Siz {
+		switch siz {
 		case 4:
 			ctxt.Out.Write64(uint64(elf.R_AARCH64_ABS32) | uint64(elfsym)<<32)
 		case 8:
@@ -360,7 +361,7 @@ func elfreloc1(ctxt *ld.Link, r *sym.Reloc, sectoff int64) bool {
 		ctxt.Out.Write64(uint64(sectoff + 4))
 		ctxt.Out.Write64(uint64(elf.R_AARCH64_LD64_GOT_LO12_NC) | uint64(elfsym)<<32)
 	case objabi.R_CALLARM64:
-		if r.Siz != 4 {
+		if siz != 4 {
 			return false
 		}
 		ctxt.Out.Write64(uint64(elf.R_AARCH64_CALL26) | uint64(elfsym)<<32)
@@ -867,12 +868,6 @@ func asmb2(ctxt *ld.Link, _ *loader.Loader) {
 		case objabi.Hplan9:
 			ld.Asmplan9sym(ctxt)
 
-			sym := ctxt.Syms.Lookup("pclntab", 0)
-			if sym != nil {
-				ld.Lcsize = int32(len(sym.P))
-				ctxt.Out.Write(sym.P)
-			}
-
 		case objabi.Hdarwin:
 			if ctxt.LinkMode == ld.LinkExternal {
 				ld.Machoemitreloc(ctxt)
@@ -888,8 +883,8 @@ func asmb2(ctxt *ld.Link, _ *loader.Loader) {
 		ctxt.Out.Write32(uint32(ld.Segtext.Filelen)) /* sizes */
 		ctxt.Out.Write32(uint32(ld.Segdata.Filelen))
 		ctxt.Out.Write32(uint32(ld.Segdata.Length - ld.Segdata.Filelen))
-		ctxt.Out.Write32(uint32(ld.Symsize))          /* nsyms */
-		ctxt.Out.Write32(uint32(ld.Entryvalue(ctxt))) /* va of entry */
+		ctxt.Out.Write32(uint32(ld.Symsize))           /* nsyms */
+		ctxt.Out.Write32(uint32(ld.Entryvalue2(ctxt))) /* va of entry */
 		ctxt.Out.Write32(0)
 		ctxt.Out.Write32(uint32(ld.Lcsize))
 

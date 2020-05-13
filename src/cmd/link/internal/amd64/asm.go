@@ -396,9 +396,9 @@ func adddynrel2(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s load
 func elfreloc2(ctxt *ld.Link, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
 	ctxt.Out.Write64(uint64(sectoff))
 
-	xsym := ldr.Syms[r.Xsym]
-	elfsym := ld.ElfSymForReloc(ctxt, xsym)
+	elfsym := ld.ElfSymForReloc2(ctxt, r.Xsym)
 	siz := r.Siz()
+	xst := ldr.SymType(r.Xsym)
 	switch r.Type() {
 	default:
 		return false
@@ -424,7 +424,7 @@ func elfreloc2(ctxt *ld.Link, ldr *loader.Loader, s loader.Sym, r loader.ExtRelo
 		}
 	case objabi.R_CALL:
 		if siz == 4 {
-			if xsym.Type == sym.SDYNIMPORT {
+			if xst == sym.SDYNIMPORT {
 				if ctxt.DynlinkingGo() {
 					ctxt.Out.Write64(uint64(elf.R_X86_64_PLT32) | uint64(elfsym)<<32)
 				} else {
@@ -438,7 +438,7 @@ func elfreloc2(ctxt *ld.Link, ldr *loader.Loader, s loader.Sym, r loader.ExtRelo
 		}
 	case objabi.R_PCREL:
 		if siz == 4 {
-			if xsym.Type == sym.SDYNIMPORT && xsym.ElfType() == elf.STT_FUNC {
+			if xst == sym.SDYNIMPORT && ldr.SymElfType(r.Xsym) == elf.STT_FUNC {
 				ctxt.Out.Write64(uint64(elf.R_X86_64_PLT32) | uint64(elfsym)<<32)
 			} else {
 				ctxt.Out.Write64(uint64(elf.R_X86_64_PC32) | uint64(elfsym)<<32)
@@ -795,12 +795,6 @@ func asmb2(ctxt *ld.Link, _ *loader.Loader) {
 		case objabi.Hplan9:
 			ld.Asmplan9sym(ctxt)
 
-			sym := ctxt.Syms.Lookup("pclntab", 0)
-			if sym != nil {
-				ld.Lcsize = int32(len(sym.P))
-				ctxt.Out.Write(sym.P)
-			}
-
 		case objabi.Hwindows:
 			// Do nothing
 
@@ -823,7 +817,7 @@ func asmb2(ctxt *ld.Link, _ *loader.Loader) {
 		ctxt.Out.Write32b(uint32(ld.Segdata.Filelen))
 		ctxt.Out.Write32b(uint32(ld.Segdata.Length - ld.Segdata.Filelen))
 		ctxt.Out.Write32b(uint32(ld.Symsize)) /* nsyms */
-		vl := ld.Entryvalue(ctxt)
+		vl := ld.Entryvalue2(ctxt)
 		ctxt.Out.Write32b(PADDR(uint32(vl))) /* va of entry */
 		ctxt.Out.Write32b(uint32(ld.Spsize)) /* sp offsets */
 		ctxt.Out.Write32b(uint32(ld.Lcsize)) /* line offsets */

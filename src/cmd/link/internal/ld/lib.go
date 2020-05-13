@@ -268,7 +268,6 @@ type Arch struct {
 	Asmb  func(*Link, *loader.Loader)
 	Asmb2 func(*Link, *loader.Loader)
 
-	Elfreloc1   func(*Link, *sym.Reloc, int64) bool
 	Elfreloc2   func(*Link, *loader.Loader, loader.Sym, loader.ExtRelocView, int64) bool
 	Elfsetupplt func(ctxt *Link, plt, gotplt *loader.SymbolBuilder, dynamic loader.Sym)
 	Gentext     func(*Link)
@@ -507,7 +506,8 @@ func (ctxt *Link) loadlib() {
 	default:
 		log.Fatalf("invalid -strictdups flag value %d", *FlagStrictDups)
 	}
-	ctxt.loader = loader.NewLoader(flags, elfsetstring, &ctxt.ErrorReporter.ErrorReporter)
+	elfsetstring1 := func(str string, off int) { elfsetstring(ctxt, 0, str, off) }
+	ctxt.loader = loader.NewLoader(flags, elfsetstring1, &ctxt.ErrorReporter.ErrorReporter)
 	ctxt.ErrorReporter.SymName = func(s loader.Sym) string {
 		return ctxt.loader.SymName(s)
 	}
@@ -2477,7 +2477,7 @@ func usage() {
 	Exit(2)
 }
 
-type SymbolType int8
+type SymbolType int8 // TODO: after genasmsym is gone, maybe rename to plan9typeChar or something
 
 const (
 	// see also https://9p.io/magic/man2html/1/nm
@@ -2662,30 +2662,15 @@ func (ctxt *Link) xdefine2(p string, t sym.SymKind, v int64) {
 	s.SetLocal(true)
 }
 
-func datoff(s *sym.Symbol, addr int64) int64 {
+func datoff(ldr *loader.Loader, s loader.Sym, addr int64) int64 {
 	if uint64(addr) >= Segdata.Vaddr {
 		return int64(uint64(addr) - Segdata.Vaddr + Segdata.Fileoff)
 	}
 	if uint64(addr) >= Segtext.Vaddr {
 		return int64(uint64(addr) - Segtext.Vaddr + Segtext.Fileoff)
 	}
-	Errorf(s, "invalid datoff %#x", addr)
+	ldr.Errorf(s, "invalid datoff %#x", addr)
 	return 0
-}
-
-func Entryvalue(ctxt *Link) int64 {
-	a := *flagEntrySymbol
-	if a[0] >= '0' && a[0] <= '9' {
-		return atolwhex(a)
-	}
-	s := ctxt.Syms.Lookup(a, 0)
-	if s.Type == 0 {
-		return *FlagTextAddr
-	}
-	if ctxt.HeadType != objabi.Haix && s.Type != sym.STEXT {
-		Errorf(s, "entry not text")
-	}
-	return s.Value
 }
 
 func Entryvalue2(ctxt *Link) int64 {
@@ -2693,15 +2678,16 @@ func Entryvalue2(ctxt *Link) int64 {
 	if a[0] >= '0' && a[0] <= '9' {
 		return atolwhex(a)
 	}
-	s := ctxt.loader.Lookup(a, 0)
-	typ := ctxt.loader.SymType(s)
-	if typ == 0 {
+	ldr := ctxt.loader
+	s := ldr.Lookup(a, 0)
+	st := ldr.SymType(s)
+	if st == 0 {
 		return *FlagTextAddr
 	}
-	if ctxt.HeadType != objabi.Haix && typ != sym.STEXT {
-		ctxt.Errorf(s, "entry not text")
+	if !ctxt.IsAIX() && st != sym.STEXT {
+		ldr.Errorf(s, "entry not text")
 	}
-	return ctxt.loader.SymValue(s)
+	return ldr.SymValue(s)
 }
 
 func (ctxt *Link) callgraph() {
@@ -2799,6 +2785,7 @@ func addToTextp(ctxt *Link) {
 }
 
 func (ctxt *Link) loadlibfull(symGroupType []sym.SymKind, needReloc, needExtReloc bool) {
+
 	// Load full symbol contents, resolve indexed references.
 	ctxt.loader.LoadFull(ctxt.Arch, ctxt.Syms, needReloc, needExtReloc)
 
@@ -2891,14 +2878,14 @@ func symPkg(ctxt *Link, s *sym.Symbol) string {
 	return ctxt.loader.SymPkg(loader.Sym(s.SymIdx))
 }
 
-func ElfSymForReloc(ctxt *Link, s *sym.Symbol) int32 {
+func ElfSymForReloc2(ctxt *Link, s loader.Sym) int32 {
 	// If putelfsym created a local version of this symbol, use that in all
 	// relocations.
-	les := ctxt.loader.SymLocalElfSym(loader.Sym(s.SymIdx))
+	les := ctxt.loader.SymLocalElfSym(s)
 	if les != 0 {
 		return les
 	} else {
-		return ctxt.loader.SymElfSym(loader.Sym(s.SymIdx))
+		return ctxt.loader.SymElfSym(s)
 	}
 }
 
