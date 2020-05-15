@@ -27,17 +27,6 @@ func expandpkg(t0 string, pkg string) string {
 	return strings.Replace(t0, `"".`, pkg+".", -1)
 }
 
-func resolveABIAlias(s *sym.Symbol) *sym.Symbol {
-	if s.Type != sym.SABIALIAS {
-		return s
-	}
-	target := s.R[0].Sym
-	if target.Type == sym.SABIALIAS {
-		panic(fmt.Sprintf("ABI alias %s references another ABI alias %s", s, target))
-	}
-	return target
-}
-
 // TODO:
 //	generate debugging section in binary.
 //	once the dust settles, try to move some code to
@@ -351,19 +340,15 @@ func fieldtrack(arch *sys.Arch, l *loader.Loader) {
 	var buf bytes.Buffer
 	for i := loader.Sym(1); i < loader.Sym(l.NSym()); i++ {
 		if name := l.SymName(i); strings.HasPrefix(name, "go.track.") {
-			bld := l.MakeSymbolUpdater(i)
-			bld.SetSpecial(true)
-			bld.SetNotInSymbolTable(true)
-			if bld.Reachable() {
+			if l.AttrReachable(i) {
+				l.SetAttrSpecial(i, true)
+				l.SetAttrNotInSymbolTable(i, true)
 				buf.WriteString(name[9:])
 				for p := l.Reachparent[i]; p != 0; p = l.Reachparent[p] {
 					buf.WriteString("\t")
 					buf.WriteString(l.SymName(p))
 				}
 				buf.WriteString("\n")
-
-				bld.SetType(sym.SCONST)
-				bld.SetValue(0)
 			}
 		}
 	}

@@ -133,19 +133,6 @@ func FoldSubSymbolOffset(ldr *loader.Loader, s loader.Sym) (loader.Sym, int64) {
 	return s, off
 }
 
-// applyOuterToXAdd takes a relocation and updates the relocation's
-// XAdd field to take into account the target syms's outer symbol (if
-// applicable).
-func ApplyOuterToXAdd(r *sym.Reloc) *sym.Symbol {
-	rs := r.Sym
-	r.Xadd = r.Add
-	if rs.Outer != nil {
-		r.Xadd += Symaddr(rs) - Symaddr(rs.Outer)
-		rs = rs.Outer
-	}
-	return rs
-}
-
 // relocsym resolve relocations in "s", updating the symbol's content
 // in "P".
 // The main loop walks through the list of relocations attached to "s"
@@ -191,6 +178,9 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			st.err.Errorf(s, "invalid relocation %s: %d+%d not in [%d,%d)", rname, off, siz, 0, len(P))
 			continue
 		}
+		if siz == 0 { // informational relocation - no work to do
+			continue
+		}
 
 		var rst sym.SymKind
 		if rs != 0 {
@@ -216,9 +206,6 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 		}
 
 		if rt >= objabi.ElfRelocOffset {
-			continue
-		}
-		if siz == 0 { // informational relocation - no work to do
 			continue
 		}
 
@@ -1105,9 +1092,8 @@ func addinitarrdata(ctxt *Link, ldr *loader.Loader, s loader.Sym) {
 }
 
 // symalign returns the required alignment for the given symbol s.
-func (state *dodataState) symalign2(s loader.Sym) int32 {
+func symalign2(ldr *loader.Loader, s loader.Sym) int32 {
 	min := int32(thearch.Minalign)
-	ldr := state.ctxt.loader
 	align := ldr.SymAlign(s)
 	if align >= min {
 		return align
@@ -1131,7 +1117,7 @@ func (state *dodataState) symalign2(s loader.Sym) int32 {
 }
 
 func aligndatsize2(state *dodataState, datsize int64, s loader.Sym) int64 {
-	return Rnd(datsize, int64(state.symalign2(s)))
+	return Rnd(datsize, int64(symalign2(state.ctxt.loader, s)))
 }
 
 const debugGCProg = false
@@ -1360,8 +1346,6 @@ type dodataState struct {
 	// Link context
 	ctxt *Link
 	// Data symbols bucketed by type.
-	data [sym.SXREF][]*sym.Symbol
-	// Data symbols bucketed by type.
 	data2 [sym.SXREF][]loader.Sym
 	// Max alignment for each flavor of data symbol.
 	dataMaxAlign [sym.SXREF]int32
@@ -1549,7 +1533,7 @@ func (state *dodataState) allocateDataSectionForSym2(seg *sym.Segment, s loader.
 	ldr := state.ctxt.loader
 	sname := ldr.SymName(s)
 	sect := addsection(ldr, state.ctxt.Arch, seg, sname, rwx)
-	sect.Align = state.symalign2(s)
+	sect.Align = symalign2(ldr, s)
 	state.datsize = Rnd(state.datsize, int64(sect.Align))
 	sect.Vaddr = uint64(state.datsize)
 	return sect
@@ -1741,7 +1725,7 @@ func (state *dodataState) allocateDataSections2(ctxt *Link) {
 	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.end", 0), sect)
 
 	// Coverage instrumentation counters for libfuzzer.
-	if len(state.data[sym.SLIBFUZZER_EXTRA_COUNTER]) > 0 {
+	if len(state.data2[sym.SLIBFUZZER_EXTRA_COUNTER]) > 0 {
 		state.allocateNamedSectionAndAssignSyms2(&Segdata, "__libfuzzer_extra_counters", sym.SLIBFUZZER_EXTRA_COUNTER, sym.Sxxx, 06)
 	}
 
@@ -2056,7 +2040,7 @@ func (state *dodataState) dodataSect2(ctxt *Link, symn sym.SymKind, syms []loade
 	for k := range sl {
 		s := sl[k].sym
 		if s != head && s != tail {
-			align := state.symalign2(s)
+			align := symalign2(ldr, s)
 			if maxAlign < align {
 				maxAlign = align
 			}
