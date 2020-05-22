@@ -39,7 +39,6 @@ import (
 	"debug/elf"
 	"fmt"
 	"log"
-	"sync"
 )
 
 // This assembler:
@@ -385,11 +384,15 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 			offset := (signext24(r.Add()&0xffffff) + 2) * 4
 			var tramp loader.Sym
 			for i := 0; ; i++ {
-				name := ldr.SymName(rs) + fmt.Sprintf("%+d-tramp%d", offset, i)
+				oName := ldr.SymName(rs)
+				name := oName + fmt.Sprintf("%+d-tramp%d", offset, i)
 				tramp = ldr.LookupOrCreateSym(name, int(ldr.SymVersion(rs)))
 				if ldr.SymType(tramp) == sym.SDYNIMPORT {
 					// don't reuse trampoline defined in other module
 					continue
+				}
+				if oName == "runtime.deferreturn" {
+					ldr.SetIsDeferReturnTramp(tramp, true)
 				}
 				if ldr.SymValue(tramp) == 0 {
 					// either the trampoline does not exist -- we need to create one,
@@ -666,35 +669,6 @@ func addgotsym(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 	} else {
 		ldr.Errorf(s, "addgotsym: unsupported binary format")
 	}
-}
-
-func asmb(ctxt *ld.Link, _ *loader.Loader) {
-	if ctxt.IsELF {
-		ld.Asmbelfsetup()
-	}
-
-	var wg sync.WaitGroup
-	sect := ld.Segtext.Sections[0]
-	offset := sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff
-	ld.WriteParallel(&wg, ld.Codeblk, ctxt, offset, sect.Vaddr, sect.Length)
-
-	for _, sect := range ld.Segtext.Sections[1:] {
-		offset := sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff
-		ld.WriteParallel(&wg, ld.Datblk, ctxt, offset, sect.Vaddr, sect.Length)
-	}
-
-	if ld.Segrodata.Filelen > 0 {
-		ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segrodata.Fileoff, ld.Segrodata.Vaddr, ld.Segrodata.Filelen)
-	}
-
-	if ld.Segrelrodata.Filelen > 0 {
-		ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segrelrodata.Fileoff, ld.Segrelrodata.Vaddr, ld.Segrelrodata.Filelen)
-	}
-
-	ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segdata.Fileoff, ld.Segdata.Vaddr, ld.Segdata.Filelen)
-
-	ld.WriteParallel(&wg, ld.Dwarfblk, ctxt, ld.Segdwarf.Fileoff, ld.Segdwarf.Vaddr, ld.Segdwarf.Filelen)
-	wg.Wait()
 }
 
 func asmb2(ctxt *ld.Link, _ *loader.Loader) {

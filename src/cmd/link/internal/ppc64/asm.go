@@ -41,7 +41,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 )
 
 func genplt(ctxt *ld.Link, ldr *loader.Loader) {
@@ -686,16 +685,20 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 				// target is at some offset within the function.  Calls to duff+8 and duff+256 must appear as
 				// distinct trampolines.
 
-				name := ldr.SymName(rs)
+				oName := ldr.SymName(rs)
+				name := oName
 				if r.Add() == 0 {
-					name = name + fmt.Sprintf("-tramp%d", i)
+					name += fmt.Sprintf("-tramp%d", i)
 				} else {
-					name = name + fmt.Sprintf("%+x-tramp%d", r.Add(), i)
+					name += fmt.Sprintf("%+x-tramp%d", r.Add(), i)
 				}
 
 				// Look up the trampoline in case it already exists
 
 				tramp = ldr.LookupOrCreateSym(name, int(ldr.SymVersion(rs)))
+				if oName == "runtime.deferreturn" {
+					ldr.SetIsDeferReturnTramp(tramp, true)
+				}
 				if ldr.SymValue(tramp) == 0 {
 					break
 				}
@@ -1075,36 +1078,6 @@ func ensureglinkresolver(ctxt *ld.Link, ldr *loader.Loader) *loader.SymbolBuilde
 	ld.Elfwritedynentsymplus(ctxt, du, ld.DT_PPC64_GLINK, glink.Sym(), glink.Size()-32)
 
 	return glink
-}
-
-func asmb(ctxt *ld.Link, _ *loader.Loader) {
-	if ctxt.IsELF {
-		ld.Asmbelfsetup()
-	}
-
-	var wg sync.WaitGroup
-	for _, sect := range ld.Segtext.Sections {
-		offset := sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff
-		// Handle additional text sections with Codeblk
-		if sect.Name == ".text" {
-			ld.WriteParallel(&wg, ld.Codeblk, ctxt, offset, sect.Vaddr, sect.Length)
-		} else {
-			ld.WriteParallel(&wg, ld.Datblk, ctxt, offset, sect.Vaddr, sect.Length)
-		}
-	}
-
-	if ld.Segrodata.Filelen > 0 {
-		ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segrodata.Fileoff, ld.Segrodata.Vaddr, ld.Segrodata.Filelen)
-	}
-
-	if ld.Segrelrodata.Filelen > 0 {
-		ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segrelrodata.Fileoff, ld.Segrelrodata.Vaddr, ld.Segrelrodata.Filelen)
-	}
-
-	ld.WriteParallel(&wg, ld.Datblk, ctxt, ld.Segdata.Fileoff, ld.Segdata.Vaddr, ld.Segdata.Filelen)
-
-	ld.WriteParallel(&wg, ld.Dwarfblk, ctxt, ld.Segdwarf.Fileoff, ld.Segdwarf.Vaddr, ld.Segdwarf.Filelen)
-	wg.Wait()
 }
 
 func asmb2(ctxt *ld.Link, _ *loader.Loader) {
