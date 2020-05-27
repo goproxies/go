@@ -37,7 +37,6 @@ import (
 	"cmd/link/internal/loader"
 	"cmd/link/internal/sym"
 	"debug/elf"
-	"fmt"
 )
 
 func gentext(ctxt *ld.Link, ldr *loader.Loader) {}
@@ -156,74 +155,4 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 
 func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc2, sym.RelocVariant, loader.Sym, int64) int64 {
 	return -1
-}
-
-func asmb2(ctxt *ld.Link, _ *loader.Loader) {
-	/* output symbol table */
-	ld.Symsize = 0
-
-	ld.Lcsize = 0
-	symo := uint32(0)
-	if !*ld.FlagS {
-		// TODO: rationalize
-		switch ctxt.HeadType {
-		default:
-			if ctxt.IsELF {
-				symo = uint32(ld.Segdwarf.Fileoff + ld.Segdwarf.Filelen)
-				symo = uint32(ld.Rnd(int64(symo), int64(*ld.FlagRound)))
-			}
-
-		case objabi.Hplan9:
-			symo = uint32(ld.Segdata.Fileoff + ld.Segdata.Filelen)
-		}
-
-		ctxt.Out.SeekSet(int64(symo))
-		switch ctxt.HeadType {
-		default:
-			if ctxt.IsELF {
-				ld.Asmelfsym(ctxt)
-				ctxt.Out.Write(ld.Elfstrdat)
-
-				if ctxt.LinkMode == ld.LinkExternal {
-					ld.Elfemitreloc(ctxt)
-				}
-			}
-
-		case objabi.Hplan9:
-			ld.Asmplan9sym(ctxt)
-		}
-	}
-
-	ctxt.Out.SeekSet(0)
-	switch ctxt.HeadType {
-	default:
-	case objabi.Hplan9: /* plan 9 */
-		magic := uint32(4*18*18 + 7)
-		if ctxt.Arch == sys.ArchMIPS64LE {
-			magic = uint32(4*26*26 + 7)
-		}
-		ctxt.Out.Write32(magic)                      /* magic */
-		ctxt.Out.Write32(uint32(ld.Segtext.Filelen)) /* sizes */
-		ctxt.Out.Write32(uint32(ld.Segdata.Filelen))
-		ctxt.Out.Write32(uint32(ld.Segdata.Length - ld.Segdata.Filelen))
-		ctxt.Out.Write32(uint32(ld.Symsize))          /* nsyms */
-		ctxt.Out.Write32(uint32(ld.Entryvalue(ctxt))) /* va of entry */
-		ctxt.Out.Write32(0)
-		ctxt.Out.Write32(uint32(ld.Lcsize))
-
-	case objabi.Hlinux,
-		objabi.Hfreebsd,
-		objabi.Hnetbsd,
-		objabi.Hopenbsd:
-		ld.Asmbelf(ctxt, int64(symo))
-	}
-
-	if *ld.FlagC {
-		fmt.Printf("textsize=%d\n", ld.Segtext.Filelen)
-		fmt.Printf("datsize=%d\n", ld.Segdata.Filelen)
-		fmt.Printf("bsssize=%d\n", ld.Segdata.Length-ld.Segdata.Filelen)
-		fmt.Printf("symsize=%d\n", ld.Symsize)
-		fmt.Printf("lcsize=%d\n", ld.Lcsize)
-		fmt.Printf("total=%d\n", ld.Segtext.Filelen+ld.Segdata.Length+uint64(ld.Symsize)+uint64(ld.Lcsize))
-	}
 }
