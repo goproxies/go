@@ -28,12 +28,6 @@ if sys.version > '3':
 goobjfile = gdb.current_objfile() or gdb.objfiles()[0]
 goobjfile.pretty_printers = []
 
-# Older gdb renders some types differently.
-def oldnew(old, new):
-  if (gdb.VERSION[0] == '7'):
-    return old
-  return new
-
 # G state (runtime2.go)
 
 def read_runtime_const(varname, default):
@@ -105,11 +99,11 @@ class SliceValue:
 #  Pretty Printers
 #
 
-
+# The patterns for matching types are permissive because gdb 8.2 switched to matching on (we think) typedef names instead of C syntax names.
 class StringTypePrinter:
 	"Pretty print Go strings."
 
-	pattern = re.compile(oldnew(r'^struct string( \*)?$',r'^string$'))
+	pattern = re.compile(r'^(struct string( \*)?|string)$')
 
 	def __init__(self, val):
 		self.val = val
@@ -125,7 +119,7 @@ class StringTypePrinter:
 class SliceTypePrinter:
 	"Pretty print slices."
 
-	pattern = re.compile(oldnew(r'^struct \[\]',r'^\[\]'))
+	pattern = re.compile(r'^(struct \[\]|\[\])')
 
 	def __init__(self, val):
 		self.val = val
@@ -134,7 +128,10 @@ class SliceTypePrinter:
 		return 'array'
 
 	def to_string(self):
-		return str(self.val.type)[oldnew(6,0):]  # skip 'struct ' for old gdb
+		t = str(self.val.type)
+		if (t.startswith("struct ")):
+			return t[len("struct "):]
+		return t
 
 	def children(self):
 		sval = SliceValue(self.val)
@@ -202,7 +199,7 @@ class ChanTypePrinter:
 	to inspect their contents with this pretty printer.
 	"""
 
-	pattern = re.compile(oldnew(r'^struct hchan<.*>$',r'^chan '))
+	pattern = re.compile(r'^chan ')
 
 	def __init__(self, val):
 		self.val = val
