@@ -12,12 +12,10 @@ type Library struct {
 	File        string
 	Pkg         string
 	Shlib       string
-	Hash        string
 	Fingerprint goobj2.FingerprintType
 	Autolib     []goobj2.ImportedPkg
 	Imports     []*Library
 	Main        bool
-	Safe        bool
 	Units       []*CompilationUnit
 
 	Textp       []LoaderSym // text syms defined in this library
