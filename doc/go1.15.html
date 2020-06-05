@@ -69,6 +69,15 @@ Do not send CLs removing the interior tags from such phrases.
 	planned to become the default NDK linker in a future NDK version.
 </p>
 
+<h3 id="openbsd">OpenBSD</h3>
+
+<p><!-- CL 234381 -->
+  Go 1.15 adds support for OpenBSD 6.7 on <code>GOARCH=arm</code>
+  and <code>GOARCH=arm64</code>. Previous versions of Go already
+  supported OpenBSD 6.7 on <code>GOARCH=386</code>
+  and <code>GOARCH=amd64</code>.
+</p>
+
 <h3 id="riscv">RISC-V</h3>
 
 <p>
@@ -574,7 +583,13 @@ TODO
 <dl id="strconv"><dt><a href="/pkg/strconv/">strconv</a></dt>
   <dd>
     <p><!-- CL 216617 -->
-      TODO: <a href="https://golang.org/cl/216617">https://golang.org/cl/216617</a>: add ParseComplex and FormatComplex
+      <a href="/pkg/strconv/#FormatComplex"><code>FormatComplex</code></a> and <a href="/pkg/strconv/#ParseComplex"><code>ParseComplex</code></a> are added for working with complex numbers.
+    </p>
+    <p>
+      <a href="/pkg/strconv/#FormatComplex"><code>FormatComplex</code></a> converts a complex number into a string of the form (a+bi), where a and b are the real and imaginary parts.
+    </p>
+    <p>
+      <a href="/pkg/strconv/#ParseComplex"><code>ParseComplex</code></a> converts a string into a complex number of a specificed precision. <code>ParseComplex</code> accepts complex numbers in the format <code>N+Ni</code>.
     </p>
   </dd>
 </dl><!-- strconv -->
@@ -614,9 +629,9 @@ TODO
     </p>
 
     <p><!-- CL 220578 -->
-      It is now possible to call system calls that return floating
-      point values on windows/amd64.
-      TODO: Point to (write?) documentation on how to do this.
+      It is <a href="/pkg/syscall/#Proc.Call">now possible</a> to call
+      system calls that return floating point values
+      on <code>windows/amd64</code>.
     </p>
   </dd>
 </dl>
@@ -656,7 +671,7 @@ TODO
     </p>
 
     <p><!-- CL 227878 -->
-      TODO: <a href="https://golang.org/cl/227878">https://golang.org/cl/227878</a>: quote original value in errors returned by ParseDuration
+      When returning an error, <a href="/pkg/time/#ParseDuration"><code>ParseDuration</code></a> now quotes the original value.
     </p>
   </dd>
 </dl><!-- time -->
