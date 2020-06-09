@@ -389,10 +389,53 @@ TODO
   </dd>
 </dl><!-- debug/pe -->
 
+<dl id="crypto"><dt><a href="/pkg/crypto/">crypto</a></dt>
+  <dd>
+    <p><!-- CL 231417, CL 225460 -->
+      The <code>PrivateKey</code> and <code>PublicKey</code> types in the
+      <a href="/pkg/crypto/rsa"><code>crypto/rsa</code></a>,
+      <a href="/pkg/crypto/ecdsa"><code>crypto/ecdsa</code></a>, and
+      <a href="/pkg/crypto/ed25519"><code>crypto/ed25519</code></a> packages
+      now have an <code>Equal</code> method to compare keys for equivalence
+      or to make type-safe interfaces for public keys. The method signature
+      is compatible with
+      <a href="https://pkg.go.dev/github.com/google/go-cmp/cmp#Equal"><code>go-cmp</code>'s
+      definition of equality</a>.
+    </p>
+
+    <p><!-- CL 224937 -->
+      <a href="/pkg/crypto/#Hash"><code>Hash</code></a> now implements
+      <a href="/pkg/fmt/#Stringer"><code>fmt.Stringer</code></a>.
+    </p>
+  </dd>
+</dl><!-- crypto -->
+
+<dl id="crypto/ecdsa"><dt><a href="/pkg/crypto/ecdsa/">crypto/ecdsa</a></dt>
+  <dd>
+    <p><!-- CL 217940 -->
+      The new <a href="/pkg/crypto/ecdsa/#SignASN1"><code>SignASN1</code></a>
+      and <a href="/pkg/crypto/ecdsa/#VerifyASN1"><code>VerifyASN1</code></a>
+      functions allow generating and verifying ECDSA signatures in the standard
+      ASN.1 DER encoding.
+    </p>
+  </dd>
+</dl><!-- crypto/ecdsa -->
+
+<dl id="crypto/elliptic"><dt><a href="/pkg/crypto/elliptic/">crypto/elliptic</a></dt>
+  <dd>
+    <p><!-- CL 202819 -->
+      The new <a href="/pkg/crypto/elliptic/#MarshalCompressed"><code>MarshalCompressed</code></a>
+      and <a href="/pkg/crypto/elliptic/#UnmarshalCompressed"><code>UnmarshalCompressed</code></a>
+      functions allow encoding and decoding NIST elliptic curve points in compressed format.
+    </p>
+  </dd>
+</dl><!-- crypto/elliptic -->
+
 <dl id="crypto/rsa"><dt><a href="/pkg/crypto/rsa/">crypto/rsa</a></dt>
   <dd>
     <p><!-- CL 226203 -->
-      VerifyPKCS1v15 now rejects invalid short signatures with missing leading zeroes.
+      <a href="/pkg/crypto/rsa/#VerifyPKCS1v15"><code>VerifyPKCS1v15</code></a>
+      now rejects invalid short signatures with missing leading zeroes, according to RFC 8017.
     </p>
   </dd>
 </dl><!-- crypto/rsa -->
@@ -406,16 +449,120 @@ TODO
       <a href="/pkg/crypto/tls/#Dialer.DialContext"><code>DialContext</code></a>
       method permits using a context to both connect and handshake with a TLS server.
     </p>
+
+    <p><!-- CL 229122 -->
+      The new
+      <a href="/pkg/crypto/tls/#Config.VerifyConnection"><code>VerifyConnection</code></a>
+      callback on the <a href="/pkg/crypto/tls/#Config"><code>Config</code></a> type
+      allows custom verification logic for every connection. It has access to the
+      <a href="/pkg/crypto/tls/#ConnectionState"><code>ConnectionState</code></a>
+      which includes peer certificates, SCTs, and stapled OCSP responses.
+    </p>
+
+    <p><!-- CL 230679 -->
+      Auto-generated session ticket keys are now automatically rotated every 24 hours,
+      with a lifetime of 7 days, to limit their impact on forward secrecy.
+    </p>
+
+    <p><!-- CL 231317 -->
+      Session ticket lifetimes in TLS 1.2 and earlier, where the session keys
+      are reused for resumed connections, are now limited to 7 days, also to
+      limit their impact on forward secrecy.
+    </p>
+
+    <p><!-- CL 231038 -->
+      The client-side downgrade protection checks specified in RFC 8446 are now
+      enforced. This has the potential to cause connection errors for clients
+      encountering middleboxes that behave like unauthorized downgrade attacks.
+    </p>
+
+    <p><!-- CL 208226 -->
+      <a href="/pkg/crypto/tls/#SignatureScheme"><code>SignatureScheme</code></a>,
+      <a href="/pkg/crypto/tls/#CurveID"><code>CurveID</code></a>, and
+      <a href="/pkg/crypto/tls/#ClientAuthType"><code>ClientAuthType</code></a>
+      now implement <a href="/pkg/fmt/#Stringer"><code>fmt.Stringer</code></a>.
+    </p>
   </dd>
-</dl>
+</dl><!-- crypto/tls -->
 
 <dl id="crypto/x509"><dt><a href="/pkg/crypto/x509/">crypto/x509</a></dt>
   <dd>
+    <p><!-- CL 231378, CL 231380, CL 231381 -->
+      If either the name on the certificate or the name being verified (with
+      <a href="/pkg/crypto/x509/#VerifyOptions.DNSName"><code>VerifyOptions.DNSName</code></a>
+      or <a href="/pkg/crypto/x509/#Certificate.VerifyHostname"><code>VerifyHostname</code></a>)
+      are invalid, they will now be compared case-insensitively without further
+      processing (without honoring wildcards or stripping trailing dots).
+      Invalid names include those with any characters other than letters,
+      digits, hyphens and underscores, those with empty labels, and names on
+      certificates with trailing dots.
+    </p>
+
+    <p><!-- CL 231379 -->
+      The deprecated, legacy behavior of treating the <code>CommonName</code>
+      field as a hostname when no Subject Alternative Names are present is now
+      disabled by default. It can be temporarily re-enabled by adding the value
+      <code>x509ignoreCN=0</code> to the <code>GODEBUG</code> environment
+      variable. If the <code>CommonName</code> is an invalid hostname, it's
+      always ignored.
+    </p>
+
+    <p><!-- CL 217298 -->
+      The new <a href="/pkg/crypto/x509/#CreateRevocationList"><code>CreateRevocationList</code></a>
+      function and <a href="/pkg/crypto/x509/#RevocationList"><code>RevocationList</code></a> type
+      allow creating RFC 5280-compliant X.509 v2 Certificate Revocation Lists.
+    </p>
+
+    <p><!-- CL 227098 -->
+      <a href="/pkg/crypto/x509/#CreateCertificate"><code>CreateCertificate</code></a>
+      now automatically generates the <code>SubjectKeyId</code> if the template
+      is a CA and doesn't explicitly specify one.
+    </p>
+
+    <p><!-- CL 228777 -->
+      <a href="/pkg/crypto/x509/#CreateCertificate"><code>CreateCertificate</code></a>
+      now returns an error if the template specifies <code>MaxPathLen</code> but is not a CA.
+    </p>
+
     <p><!-- CL 205237 -->
-      TODO: <a href="https://golang.org/cl/205237">https://golang.org/cl/205237</a>: load roots from colon separated SSL_CERT_DIR in loadSystemRoots
+      On Unix systems other than macOS, the <code>SSL_CERT_DIR</code>
+      environment variable can now be a colon-separated list.
+    </p>
+
+    <p><!-- CL 227037 -->
+      On macOS, binaries are now always linked against
+      <code>Security.framework</code> to extract the system trust roots,
+      regardless of whether cgo is available. The resulting behavior should be
+      more consistent with the OS verifier.
     </p>
   </dd>
 </dl><!-- crypto/x509 -->
+
+<dl id="crypto/x509/pkix"><dt><a href="/pkg/crypto/x509/pkix/">crypto/x509/pkix</a></dt>
+  <dd>
+    <p><!-- CL 229864 -->
+      <a href="/pkg/crypto/x509/pkix/#Name.String"><code>Name.String</code></a>
+      now prints non-standard attributes from
+      <a href="/pkg/crypto/x509/pkix/#Name.Names"><code>Names</code></a> if
+      <a href="/pkg/crypto/x509/pkix/#Name.ExtraNames"><code>ExtraNames</code></a> is empty.
+    </p>
+  </dd>
+</dl><!-- crypto/x509/pkix -->
+
+<dl id="encoding/json"><dt><a href="/pkg/encoding/json/">encoding/json</a></dt>
+  <dd>
+    <p><!-- CL 191783 -->
+      Decoding a JSON array into a slice no longer reuses any existing slice elements,
+      following the rules that the package documentation already stated.
+    </p>
+
+    <p><!-- CL 199837 -->
+      Introduce an internal limit to the maximum depth of nesting when decoding.
+      This reduces the possibility that a deeply nested input could use large quantities
+      of stack memory, or even cause a "goroutine stack exceeds limit" panic.
+    </p>
+  </dd>
+</dl><!-- encoding/json -->
 
 <dl id="encoding/xml"><dt><a href="/pkg/encoding/xml/">encoding/xml</a></dt>
   <dd>
@@ -464,7 +611,8 @@ TODO
 <dl id="math/big"><dt><a href="/pkg/math/big/">math/big</a></dt>
   <dd>
     <p><!-- CL 230397 -->
-      TODO: <a href="https://golang.org/cl/230397">https://golang.org/cl/230397</a>: add (*Int).FillBytes
+      The new <a href="/pkg/math/big/#Int.FillBytes"><code>Int.FillBytes</code></a>
+      method allows serializing to fixed-size pre-allocated byte slices.
     </p>
   </dd>
 </dl><!-- math/big -->
