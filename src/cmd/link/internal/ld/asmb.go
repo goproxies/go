@@ -6,19 +6,23 @@ package ld
 
 import (
 	"cmd/internal/objabi"
-	"cmd/link/internal/loader"
 	"fmt"
 	"sync"
 )
 
 // Assembling the binary is broken into two steps:
-//  - writing out the code/data/dwarf Segments
+//  - writing out the code/data/dwarf Segments, applying relocations on the fly
 //  - writing out the architecture specific pieces.
 // This function handles the first part.
-func asmb(ctxt *Link, ldr *loader.Loader) {
+func asmb(ctxt *Link) {
+	ctxt.loader.InitOutData()
+	if ctxt.IsExternal() {
+		ctxt.loader.InitExtRelocs()
+	}
+
 	// TODO(jfaller): delete me.
 	if thearch.Asmb != nil {
-		thearch.Asmb(ctxt, ldr)
+		thearch.Asmb(ctxt, ctxt.loader)
 		return
 	}
 
@@ -41,7 +45,7 @@ func asmb(ctxt *Link, ldr *loader.Loader) {
 		writeParallel(&wg, f, ctxt, offset, sect.Vaddr, sect.Length)
 		for _, sect := range Segtext.Sections[1:] {
 			offset := sect.Vaddr - Segtext.Vaddr + Segtext.Fileoff
-			writeParallel(&wg, Datblk, ctxt, offset, sect.Vaddr, sect.Length)
+			writeParallel(&wg, datblk, ctxt, offset, sect.Vaddr, sect.Length)
 		}
 	} else {
 		// TODO why can't we handle all sections this way?
@@ -51,20 +55,20 @@ func asmb(ctxt *Link, ldr *loader.Loader) {
 			if sect.Name == ".text" {
 				writeParallel(&wg, f, ctxt, offset, sect.Vaddr, sect.Length)
 			} else {
-				writeParallel(&wg, Datblk, ctxt, offset, sect.Vaddr, sect.Length)
+				writeParallel(&wg, datblk, ctxt, offset, sect.Vaddr, sect.Length)
 			}
 		}
 	}
 
 	if Segrodata.Filelen > 0 {
-		writeParallel(&wg, Datblk, ctxt, Segrodata.Fileoff, Segrodata.Vaddr, Segrodata.Filelen)
+		writeParallel(&wg, datblk, ctxt, Segrodata.Fileoff, Segrodata.Vaddr, Segrodata.Filelen)
 	}
 
 	if Segrelrodata.Filelen > 0 {
-		writeParallel(&wg, Datblk, ctxt, Segrelrodata.Fileoff, Segrelrodata.Vaddr, Segrelrodata.Filelen)
+		writeParallel(&wg, datblk, ctxt, Segrelrodata.Fileoff, Segrelrodata.Vaddr, Segrelrodata.Filelen)
 	}
 
-	writeParallel(&wg, Datblk, ctxt, Segdata.Fileoff, Segdata.Vaddr, Segdata.Filelen)
+	writeParallel(&wg, datblk, ctxt, Segdata.Fileoff, Segdata.Vaddr, Segdata.Filelen)
 
 	writeParallel(&wg, dwarfblk, ctxt, Segdwarf.Fileoff, Segdwarf.Vaddr, Segdwarf.Filelen)
 
