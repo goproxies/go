@@ -336,8 +336,10 @@ Do not send CLs removing the interior tags from such phrases.
 </p>
 
 <p><!-- CL 207877 -->
-  TODO: <a href="https://golang.org/cl/207877">https://golang.org/cl/207877</a>: Revert -buildmode=pie to internal linking.
-  The linker defaults to internal linking mode for PIE on linux/amd64 and linux/arm64, which does require a C linker.
+  The linker now defaults to internal linking mode
+  for <code>-buildmode=pie</code> on
+  <code>linux/amd64</code> and <code>linux/arm64</code>, so these
+  configurations no longer require a C linker.
 </p>
 
 <h2 id="objdump">Objdump</h2>
@@ -956,7 +958,8 @@ Do not send CLs removing the interior tags from such phrases.
     </p>
 
     <p><!-- CL 229085 -->
-      TODO: <a href="https://golang.org/cl/229085">https://golang.org/cl/229085</a>: reformat test chatty output
+      <code>go</code> <code>test</code> <code>-v</code> now groups output by
+      test name, rather than printing the test name on each line.
     </p>
   </dd>
 </dl><!-- testing -->
