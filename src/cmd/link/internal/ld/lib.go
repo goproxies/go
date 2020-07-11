@@ -123,12 +123,14 @@ type ArchSyms struct {
 // mkArchSym is a helper for setArchSyms, to set up a special symbol.
 func (ctxt *Link) mkArchSym(name string, ver int, ls *loader.Sym) {
 	*ls = ctxt.loader.LookupOrCreateSym(name, ver)
+	ctxt.loader.SetAttrReachable(*ls, true)
 }
 
 // mkArchVecSym is similar to  setArchSyms, but operates on elements within
 // a slice, where each element corresponds to some symbol version.
 func (ctxt *Link) mkArchSymVec(name string, ver int, ls []loader.Sym) {
 	ls[ver] = ctxt.loader.LookupOrCreateSym(name, ver)
+	ctxt.loader.SetAttrReachable(ls[ver], true)
 }
 
 // setArchSyms sets up the ArchSyms structure, and must be called before
@@ -1999,7 +2001,9 @@ func ldshlibsyms(ctxt *Link, shlib string) {
 		Errorf(nil, "cannot open shared library: %s", libpath)
 		return
 	}
-	defer f.Close()
+	// Keep the file open as decodetypeGcprog needs to read from it.
+	// TODO: fix. Maybe mmap the file.
+	//defer f.Close()
 
 	hash, err := readnote(f, ELF_NOTE_GO_NAME, ELF_NOTE_GOABIHASH_TAG)
 	if err != nil {
@@ -2034,7 +2038,6 @@ func ldshlibsyms(ctxt *Link, shlib string) {
 		Errorf(nil, "cannot read symbols from shared library: %s", libpath)
 		return
 	}
-	gcdataLocations := make(map[uint64]loader.Sym)
 	for _, elfsym := range syms {
 		if elf.ST_TYPE(elfsym.Info) == elf.STT_NOTYPE || elf.ST_TYPE(elfsym.Info) == elf.STT_SECTION {
 			continue
@@ -2081,7 +2084,6 @@ func ldshlibsyms(ctxt *Link, shlib string) {
 			sname := l.SymName(s)
 			if strings.HasPrefix(sname, "type.") && !strings.HasPrefix(sname, "type..") {
 				su.SetData(readelfsymboldata(ctxt, f, &elfsym))
-				gcdataLocations[elfsym.Value+2*uint64(ctxt.Arch.PtrSize)+8+1*uint64(ctxt.Arch.PtrSize)] = s
 			}
 		}
 
@@ -2102,28 +2104,6 @@ func ldshlibsyms(ctxt *Link, shlib string) {
 			su.AddReloc(loader.Reloc{Sym: s})
 		}
 	}
-	if ctxt.Arch.Family == sys.ARM64 {
-		for _, sect := range f.Sections {
-			if sect.Type == elf.SHT_RELA {
-				var rela elf.Rela64
-				rdr := sect.Open()
-				for {
-					err := binary.Read(rdr, f.ByteOrder, &rela)
-					if err == io.EOF {
-						break
-					} else if err != nil {
-						Errorf(nil, "reading relocation failed %v", err)
-						return
-					}
-					t := elf.R_AARCH64(rela.Info & 0xffff)
-					if t != elf.R_AARCH64_RELATIVE {
-						continue
-					}
-				}
-			}
-		}
-	}
-
 	ctxt.Shlibs = append(ctxt.Shlibs, Shlib{Path: libpath, Hash: hash, Deps: deps, File: f})
 }
 
