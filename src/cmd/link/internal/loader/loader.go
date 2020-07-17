@@ -18,7 +18,6 @@ import (
 	"math/bits"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -61,7 +60,7 @@ type ExtReloc struct {
 // It is not the data structure used to store the payload internally.
 type ExtRelocView struct {
 	Reloc2
-	*ExtReloc
+	ExtReloc
 }
 
 // Reloc2 holds a "handle" to access a relocation record from an
@@ -106,17 +105,22 @@ func (a Aux2) Sym() Sym { return a.l.resolve(a.r, a.Aux.Sym()) }
 
 // oReader is a wrapper type of obj.Reader, along with some
 // extra information.
-// TODO: rename to objReader once the old one is gone?
 type oReader struct {
 	*goobj2.Reader
-	unit      *sym.CompilationUnit
-	version   int    // version of static symbol
-	flags     uint32 // read from object file
-	pkgprefix string
-	syms      []Sym  // Sym's global index, indexed by local index
-	ndef      int    // cache goobj2.Reader.NSym()
-	objidx    uint32 // index of this reader in the objs slice
+	unit         *sym.CompilationUnit
+	version      int    // version of static symbol
+	flags        uint32 // read from object file
+	pkgprefix    string
+	syms         []Sym  // Sym's global index, indexed by local index
+	ndef         int    // cache goobj2.Reader.NSym()
+	nhashed64def int    // cache goobj2.Reader.NHashed64Def()
+	nhasheddef   int    // cache goobj2.Reader.NHashedDef()
+	objidx       uint32 // index of this reader in the objs slice
 }
+
+// Total number of defined symbols (package symbols, hashed symbols, and
+// non-package symbols).
+func (r *oReader) NAlldef() int { return r.ndef + r.nhashed64def + r.nhasheddef + r.NNonpkgdef() }
 
 type objIdx struct {
 	r *oReader
@@ -186,6 +190,12 @@ func growBitmap(reqLen int, b Bitmap) Bitmap {
 	return b
 }
 
+type symSizeAlign struct {
+	sym   Sym
+	size  uint32
+	align uint32
+}
+
 // A Loader loads new object files and resolves indexed symbol references.
 //
 // Notes on the layout of global symbol index space:
@@ -213,8 +223,10 @@ type Loader struct {
 
 	objSyms []objSym // global index mapping to local index
 
-	symsByName    [2]map[string]Sym // map symbol name to index, two maps are for ABI0 and ABIInternal
-	extStaticSyms map[nameVer]Sym   // externally defined static symbols, keyed by name
+	hashed64Syms  map[uint64]symSizeAlign          // short hashed (content-addressable) symbols, keyed by content hash
+	hashedSyms    map[goobj2.HashType]symSizeAlign // hashed (content-addressable) symbols, keyed by content hash
+	symsByName    [2]map[string]Sym                // map symbol name to index, two maps are for ABI0 and ABIInternal
+	extStaticSyms map[nameVer]Sym                  // externally defined static symbols, keyed by name
 
 	extReader    *oReader // a dummy oReader, for external symbols
 	payloadBatch []extSymPayload
@@ -292,10 +304,14 @@ type Loader struct {
 	elfsetstring elfsetstringFunc
 
 	errorReporter *ErrorReporter
+
+	npkgsyms int // number of package symbols, for accounting
 }
 
 const (
 	pkgDef = iota
+	hashed64Def
+	hashedDef
 	nonPkgDef
 	nonPkgRef
 )
@@ -336,7 +352,9 @@ func NewLoader(flags uint32, elfsetstring elfsetstringFunc, reporter *ErrorRepor
 		objs:                 []objIdx{{}, {extReader, 0}}, // reserve index 0 for nil symbol, 1 for external symbols
 		objSyms:              make([]objSym, 1, 100000),    // reserve index 0 for nil symbol
 		extReader:            extReader,
-		symsByName:           [2]map[string]Sym{make(map[string]Sym, 100000), make(map[string]Sym, 50000)}, // preallocate ~2MB for ABI0 and ~1MB for ABI1 symbols
+		hashed64Syms:         make(map[uint64]symSizeAlign, 10000),                                        // TODO: adjust preallocation sizes
+		hashedSyms:           make(map[goobj2.HashType]symSizeAlign, 20000),                               // TODO: adjust preallocation sizes
+		symsByName:           [2]map[string]Sym{make(map[string]Sym, 80000), make(map[string]Sym, 50000)}, // preallocate ~2MB for ABI0 and ~1MB for ABI1 symbols
 		objByPkg:             make(map[string]*oReader),
 		outer:                make(map[Sym]Sym),
 		sub:                  make(map[Sym]Sym),
@@ -387,15 +405,15 @@ func (l *Loader) addObj(pkg string, r *oReader) Sym {
 
 // Add a symbol from an object file, return the global index and whether it is added.
 // If the symbol already exist, it returns the index of that symbol.
-func (l *Loader) AddSym(name string, ver int, r *oReader, li uint32, kind int, dupok bool, typ sym.SymKind) (Sym, bool) {
+func (l *Loader) addSym(name string, ver int, r *oReader, li uint32, kind int, osym *goobj2.Sym) (Sym, bool) {
 	if l.extStart != 0 {
-		panic("AddSym called after external symbol is created")
+		panic("addSym called after external symbol is created")
 	}
 	i := Sym(len(l.objSyms))
 	addToGlobal := func() {
 		l.objSyms = append(l.objSyms, objSym{r.objidx, li})
 	}
-	if name == "" {
+	if name == "" && kind != hashed64Def && kind != hashedDef {
 		addToGlobal()
 		return i, true // unnamed aux symbol
 	}
@@ -406,13 +424,70 @@ func (l *Loader) AddSym(name string, ver int, r *oReader, li uint32, kind int, d
 		addToGlobal()
 		return i, true
 	}
-	if kind == pkgDef {
+	switch kind {
+	case pkgDef:
 		// Defined package symbols cannot be dup to each other.
 		// We load all the package symbols first, so we don't need
 		// to check dup here.
 		// We still add it to the lookup table, as it may still be
 		// referenced by name (e.g. through linkname).
 		l.symsByName[ver][name] = i
+		addToGlobal()
+		return i, true
+	case hashed64Def:
+		// Hashed (content-addressable) symbol. Check the hash
+		// but don't add to name lookup table, as they are not
+		// referenced by name. Also no need to do overwriting
+		// check, as same hash indicates same content.
+		hash := r.Hash64(li - uint32(r.ndef))
+		siz := osym.Siz()
+		align := osym.Align()
+		if s, existed := l.hashed64Syms[hash]; existed {
+			// For short symbols, the content hash is the identity function of the
+			// 8 bytes, and trailing zeros doesn't change the hash value, e.g.
+			// hash("A") == hash("A\0\0\0").
+			// So when two symbols have the same hash, we need to use the one with
+			// larget size.
+			if siz <= s.size {
+				if align > s.align { // we need to use the biggest alignment
+					l.SetSymAlign(s.sym, int32(align))
+					l.hashed64Syms[hash] = symSizeAlign{s.sym, s.size, align}
+				}
+			} else {
+				// New symbol has larger size, use the new one. Rewrite the index mapping.
+				l.objSyms[s.sym] = objSym{r.objidx, li}
+				if align < s.align {
+					align = s.align // keep the biggest alignment
+					l.SetSymAlign(s.sym, int32(align))
+				}
+				l.hashed64Syms[hash] = symSizeAlign{s.sym, siz, align}
+			}
+			return s.sym, false
+		}
+		l.hashed64Syms[hash] = symSizeAlign{i, siz, align}
+		addToGlobal()
+		return i, true
+	case hashedDef:
+		// Hashed (content-addressable) symbol. Check the hash
+		// but don't add to name lookup table, as they are not
+		// referenced by name. Also no need to do overwriting
+		// check, as same hash indicates same content.
+		hash := r.Hash(li - uint32(r.ndef+r.nhashed64def))
+		if s, existed := l.hashedSyms[*hash]; existed {
+			if s.size != osym.Siz() {
+				fmt.Printf("hash collision: %v (size %d) and %v (size %d), hash %x\n", l.SymName(s.sym), s.size, osym.Name(r.Reader), osym.Siz(), *hash)
+				panic("hash collision")
+			}
+			if l.flags&FlagStrictDups != 0 {
+				l.checkdup(name, r, li, s.sym)
+			}
+			if a := osym.Align(); a > s.align { // we need to use the biggest alignment
+				l.SetSymAlign(s.sym, int32(a))
+				l.hashedSyms[*hash] = symSizeAlign{s.sym, s.size, a}
+			}
+			return s.sym, false
+		}
+		l.hashedSyms[*hash] = symSizeAlign{i, osym.Siz(), osym.Align()}
 		addToGlobal()
 		return i, true
 	}
@@ -425,7 +500,7 @@ func (l *Loader) AddSym(name string, ver int, r *oReader, li uint32, kind int, d
 		return i, true
 	}
 	// symbol already exists
-	if dupok {
+	if osym.Dupok() {
 		if l.flags&FlagStrictDups != 0 {
 			l.checkdup(name, r, li, oldi)
 		}
@@ -446,6 +521,7 @@ func (l *Loader) AddSym(name string, ver int, r *oReader, li uint32, kind int, d
 		l.objSyms[oldi] = objSym{r.objidx, li}
 	} else {
 		// old symbol overwrites new symbol.
+		typ := sym.AbiSymKindToSymKind[objabi.SymKind(oldsym.Type())]
 		if !typ.IsData() { // only allow overwriting data symbol
 			log.Fatalf("duplicated definition of symbol " + name)
 		}
@@ -577,8 +653,14 @@ func (l *Loader) resolve(r *oReader, s goobj2.SymRef) Sym {
 			panic("bad sym ref")
 		}
 		return 0
-	case goobj2.PkgIdxNone:
+	case goobj2.PkgIdxHashed64:
 		i := int(s.SymIdx) + r.ndef
+		return r.syms[i]
+	case goobj2.PkgIdxHashed:
+		i := int(s.SymIdx) + r.ndef + r.nhashed64def
+		return r.syms[i]
+	case goobj2.PkgIdxNone:
+		i := int(s.SymIdx) + r.ndef + r.nhashed64def + r.nhasheddef
 		return r.syms[i]
 	case goobj2.PkgIdxBuiltin:
 		return l.builtinSyms[s.SymIdx]
@@ -1827,7 +1909,7 @@ func (ers ExtRelocs) Count() int { return len(ers.es) }
 
 func (ers ExtRelocs) At(j int) ExtRelocView {
 	i := ers.es[j].Idx
-	return ExtRelocView{ers.rs.At2(i), &ers.es[j]}
+	return ExtRelocView{ers.rs.At2(i), ers.es[j]}
 }
 
 // RelocByOff implements sort.Interface for sorting relocations by offset.
@@ -2020,8 +2102,20 @@ func (l *Loader) Preload(localSymVersion int, f *bio.Reader, lib *sym.Library, u
 	}
 	pkgprefix := objabi.PathToPrefix(lib.Pkg) + "."
 	ndef := r.NSym()
-	nnonpkgdef := r.NNonpkgdef()
-	or := &oReader{r, unit, localSymVersion, r.Flags(), pkgprefix, make([]Sym, ndef+nnonpkgdef+r.NNonpkgref()), ndef, uint32(len(l.objs))}
+	nhashed64def := r.NHashed64def()
+	nhasheddef := r.NHasheddef()
+	or := &oReader{
+		Reader:       r,
+		unit:         unit,
+		version:      localSymVersion,
+		flags:        r.Flags(),
+		pkgprefix:    pkgprefix,
+		syms:         make([]Sym, ndef+nhashed64def+nhasheddef+r.NNonpkgdef()+r.NNonpkgref()),
+		ndef:         ndef,
+		nhasheddef:   nhasheddef,
+		nhashed64def: nhashed64def,
+		objidx:       uint32(len(l.objs)),
+	}
 
 	// Autolib
 	lib.Autolib = append(lib.Autolib, r.Autolib()...)
@@ -2044,16 +2138,20 @@ func (l *Loader) Preload(localSymVersion int, f *bio.Reader, lib *sym.Library, u
 
 // Preload symbols of given kind from an object.
 func (l *Loader) preloadSyms(r *oReader, kind int) {
-	ndef := uint32(r.NSym())
-	nnonpkgdef := uint32(r.NNonpkgdef())
 	var start, end uint32
 	switch kind {
 	case pkgDef:
 		start = 0
-		end = ndef
+		end = uint32(r.ndef)
+	case hashed64Def:
+		start = uint32(r.ndef)
+		end = uint32(r.ndef + r.nhashed64def)
+	case hashedDef:
+		start = uint32(r.ndef + r.nhashed64def)
+		end = uint32(r.ndef + r.nhashed64def + r.nhasheddef)
 	case nonPkgDef:
-		start = ndef
-		end = ndef + nnonpkgdef
+		start = uint32(r.ndef + r.nhashed64def + r.nhasheddef)
+		end = uint32(r.ndef + r.nhashed64def + r.nhasheddef + r.NNonpkgdef())
 	default:
 		panic("preloadSyms: bad kind")
 	}
@@ -2062,13 +2160,16 @@ func (l *Loader) preloadSyms(r *oReader, kind int) {
 	loadingRuntimePkg := r.unit.Lib.Pkg == "runtime"
 	for i := start; i < end; i++ {
 		osym := r.Sym(i)
-		name := osym.Name(r.Reader)
-		if needNameExpansion {
-			name = strings.Replace(name, "\"\".", r.pkgprefix, -1)
+		var name string
+		var v int
+		if kind != hashed64Def && kind != hashedDef { // we don't need the name, etc. for hashed symbols
+			name = osym.Name(r.Reader)
+			if needNameExpansion {
+				name = strings.Replace(name, "\"\".", r.pkgprefix, -1)
+			}
+			v = abiToVer(osym.ABI(), r.version)
 		}
-		v := abiToVer(osym.ABI(), r.version)
-		dupok := osym.Dupok()
-		gi, added := l.AddSym(name, v, r, i, kind, dupok, sym.AbiSymKindToSymKind[objabi.SymKind(osym.Type())])
+		gi, added := l.addSym(name, v, r, i, kind, osym)
 		r.syms[i] = gi
 		if !added {
 			continue
@@ -2098,10 +2199,13 @@ func (l *Loader) preloadSyms(r *oReader, kind int) {
 	}
 }
 
-// Add non-package symbols and references to external symbols (which are always
-// named).
+// Add hashed (content-addressable) symbols, non-package symbols, and
+// references to external symbols (which are always named).
 func (l *Loader) LoadNonpkgSyms(arch *sys.Arch) {
+	l.npkgsyms = l.NSym()
 	for _, o := range l.objs[goObjStart:] {
+		l.preloadSyms(o.r, hashed64Def)
+		l.preloadSyms(o.r, hashedDef)
 		l.preloadSyms(o.r, nonPkgDef)
 	}
 	for _, o := range l.objs[goObjStart:] {
@@ -2111,7 +2215,7 @@ func (l *Loader) LoadNonpkgSyms(arch *sys.Arch) {
 }
 
 func loadObjRefs(l *Loader, r *oReader, arch *sys.Arch) {
-	ndef := uint32(r.NSym() + r.NNonpkgdef())
+	ndef := uint32(r.NAlldef())
 	needNameExpansion := r.NeedNameExpansion()
 	for i, n := uint32(0), uint32(r.NNonpkgref()); i < n; i++ {
 		osym := r.Sym(ndef + i)
@@ -2128,7 +2232,6 @@ func loadObjRefs(l *Loader, r *oReader, arch *sys.Arch) {
 		if osym.UsedInIface() {
 			l.SetAttrUsedInIface(gi, true)
 		}
-		l.preprocess(arch, gi, name)
 	}
 }
 
@@ -2144,33 +2247,6 @@ func abiToVer(abi uint16, localSymVersion int) int {
 		log.Fatalf("invalid symbol ABI: %d", abi)
 	}
 	return v
-}
-
-// preprocess looks for integer/floating point constant symbols whose
-// content is encoded into the symbol name, and promotes them into
-// real symbols with RODATA type and a payload that matches the
-// encoded content.
-func (l *Loader) preprocess(arch *sys.Arch, s Sym, name string) {
-	if name != "" && name[0] == '$' && len(name) > 5 && l.SymType(s) == 0 && len(l.Data(s)) == 0 {
-		x, err := strconv.ParseUint(name[5:], 16, 64)
-		if err != nil {
-			log.Panicf("failed to parse $-symbol %s: %v", name, err)
-		}
-		su := l.MakeSymbolUpdater(s)
-		su.SetType(sym.SRODATA)
-		su.SetLocal(true)
-		switch name[:5] {
-		case "$f32.":
-			if uint64(uint32(x)) != x {
-				log.Panicf("$-symbol %s too large: %d", name, x)
-			}
-			su.AddUint32(arch, uint32(x))
-		case "$f64.", "$i64.":
-			su.AddUint64(arch, x)
-		default:
-			log.Panicf("unrecognized $-symbol: %s", name)
-		}
-	}
 }
 
 // ResolveABIAlias given a symbol returns the ABI alias target of that
@@ -2247,7 +2323,7 @@ func (l *Loader) cloneToExternal(symIdx Sym) {
 
 	// If this is a def, then copy the guts. We expect this case
 	// to be very rare (one case it may come up is with -X).
-	if li < uint32(r.NSym()+r.NNonpkgdef()) {
+	if li < uint32(r.NAlldef()) {
 
 		// Copy relocations
 		relocs := l.Relocs(symIdx)
@@ -2436,7 +2512,7 @@ func (l *Loader) AssignTextSymbolOrder(libs []*sym.Library, intlibs []bool, exts
 	for _, o := range l.objs[goObjStart:] {
 		r := o.r
 		lib := r.unit.Lib
-		for i, n := uint32(0), uint32(r.NSym()+r.NNonpkgdef()); i < n; i++ {
+		for i, n := uint32(0), uint32(r.NAlldef()); i < n; i++ {
 			gi := l.toGlobal(r, i)
 			if !l.attrReachable.Has(gi) {
 				continue
@@ -2534,6 +2610,14 @@ func (l *Loader) GetErrorReporter() *ErrorReporter {
 // Errorf method logs an error message. See ErrorReporter.Errorf for details.
 func (l *Loader) Errorf(s Sym, format string, args ...interface{}) {
 	l.errorReporter.Errorf(s, format, args...)
+}
+
+// Symbol statistics.
+func (l *Loader) Stat() string {
+	s := fmt.Sprintf("%d symbols, %d reachable\n", l.NSym(), l.NReachableSym())
+	s += fmt.Sprintf("\t%d package symbols, %d hashed symbols, %d non-package symbols, %d external symbols\n",
+		l.npkgsyms, len(l.hashed64Syms)+len(l.hashedSyms), int(l.extStart)-l.npkgsyms-len(l.hashed64Syms)-len(l.hashedSyms), l.NSym()-int(l.extStart))
+	return s
 }
 
 // For debugging.

@@ -9,6 +9,7 @@ package goobj2 // TODO: replace the goobj package?
 import (
 	"bytes"
 	"cmd/internal/bio"
+	"crypto/sha1"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -46,12 +47,21 @@ import (
 //       Flag uint8
 //       Size uint32
 //    }
+//    Hashed64Defs [...]struct { // short hashed (content-addressable) symbol definitions
+//       ... // same as SymbolDefs
+//    }
+//    HashedDefs [...]struct { // hashed (content-addressable) symbol definitions
+//       ... // same as SymbolDefs
+//    }
 //    NonPkgDefs [...]struct { // non-pkg symbol definitions
 //       ... // same as SymbolDefs
 //    }
 //    NonPkgRefs [...]struct { // non-pkg symbol references
 //       ... // same as SymbolDefs
 //    }
+//
+//    Hash64 [...][8]byte
+//    Hash   [...][N]byte
 //
 //    RelocIndex [...]uint32 // index to Relocs
 //    AuxIndex   [...]uint32 // index to Aux
@@ -104,6 +114,10 @@ import (
 // SymIdx is the index of the symbol in the given package.
 // - If PkgIdx is PkgIdxSelf, SymIdx is the index of the symbol in the
 //   SymbolDefs array.
+// - If PkgIdx is PkgIdxHashed64, SymIdx is the index of the symbol in the
+//   Hashed64Defs array.
+// - If PkgIdx is PkgIdxHashed, SymIdx is the index of the symbol in the
+//   HashedDefs array.
 // - If PkgIdx is PkgIdxNone, SymIdx is the index of the symbol in the
 //   NonPkgDefs array (could natually overflow to NonPkgRefs array).
 // - Otherwise, SymIdx is the index of the symbol in some other package's
@@ -111,12 +125,17 @@ import (
 //
 // {0, 0} represents a nil symbol. Otherwise PkgIdx should not be 0.
 //
+// Hash contains the content hashes of content-addressable symbols, of
+// which PkgIdx is PkgIdxHashed, in the same order of HashedDefs array.
+// Hash64 is similar, for PkgIdxHashed64 symbols.
+//
 // RelocIndex, AuxIndex, and DataIndex contains indices/offsets to
 // Relocs/Aux/Data blocks, one element per symbol, first for all the
-// defined symbols, then all the defined non-package symbols, in the
-// same order of SymbolDefs/NonPkgDefs arrays. For N total defined
-// symbols, the array is of length N+1. The last element is the total
-// number of relocations (aux symbols, data blocks, etc.).
+// defined symbols, then all the defined hashed and non-package symbols,
+// in the same order of SymbolDefs/Hashed64Defs/HashedDefs/NonPkgDefs
+// arrays. For N total defined symbols, the array is of length N+1. The
+// last element is the total number of relocations (aux symbols, data
+// blocks, etc.).
 //
 // They can be accessed by index. For the i-th symbol, its relocations
 // are the RelocIndex[i]-th (inclusive) to RelocIndex[i+1]-th (exclusive)
@@ -127,8 +146,8 @@ import (
 //
 // Each symbol may (or may not) be associated with a number of auxiliary
 // symbols. They are described in the Aux block. See Aux struct below.
-// Currently a symbol's Gotype and FuncInfo are auxiliary symbols. We
-// may make use of aux symbols in more cases, e.g. DWARF symbols.
+// Currently a symbol's Gotype, FuncInfo, and associated DWARF symbols
+// are auxiliary symbols.
 
 const stringRefSize = 8 // two uint32s
 
@@ -138,10 +157,12 @@ func (fp FingerprintType) IsZero() bool { return fp == FingerprintType{} }
 
 // Package Index.
 const (
-	PkgIdxNone    = (1<<31 - 1) - iota // Non-package symbols
-	PkgIdxBuiltin                      // Predefined runtime symbols (ex: runtime.newobject)
-	PkgIdxSelf                         // Symbols defined in the current package
-	PkgIdxInvalid = 0
+	PkgIdxNone     = (1<<31 - 1) - iota // Non-package symbols
+	PkgIdxHashed64                      // Short hashed (content-addressable) symbols
+	PkgIdxHashed                        // Hashed (content-addressable) symbols
+	PkgIdxBuiltin                       // Predefined runtime symbols (ex: runtime.newobject)
+	PkgIdxSelf                          // Symbols defined in the current package
+	PkgIdxInvalid  = 0
 	// The index of other referenced packages starts from 1.
 )
 
@@ -151,8 +172,12 @@ const (
 	BlkPkgIdx
 	BlkDwarfFile
 	BlkSymdef
+	BlkHashed64def
+	BlkHasheddef
 	BlkNonpkgdef
 	BlkNonpkgref
+	BlkHash64
+	BlkHash
 	BlkRelocIdx
 	BlkAuxIdx
 	BlkDataIdx
@@ -306,6 +331,16 @@ type SymRef struct {
 	PkgIdx uint32
 	SymIdx uint32
 }
+
+// Hash64
+type Hash64Type [Hash64Size]byte
+
+const Hash64Size = 8
+
+// Hash
+type HashType [HashSize]byte
+
+const HashSize = sha1.Size
 
 // Relocation.
 //
@@ -622,6 +657,14 @@ func (r *Reader) NSym() int {
 	return int(r.h.Offsets[BlkSymdef+1]-r.h.Offsets[BlkSymdef]) / SymSize
 }
 
+func (r *Reader) NHashed64def() int {
+	return int(r.h.Offsets[BlkHashed64def+1]-r.h.Offsets[BlkHashed64def]) / SymSize
+}
+
+func (r *Reader) NHasheddef() int {
+	return int(r.h.Offsets[BlkHasheddef+1]-r.h.Offsets[BlkHasheddef]) / SymSize
+}
+
 func (r *Reader) NNonpkgdef() int {
 	return int(r.h.Offsets[BlkNonpkgdef+1]-r.h.Offsets[BlkNonpkgdef]) / SymSize
 }
@@ -639,6 +682,22 @@ func (r *Reader) SymOff(i uint32) uint32 {
 func (r *Reader) Sym(i uint32) *Sym {
 	off := r.SymOff(i)
 	return (*Sym)(unsafe.Pointer(&r.b[off]))
+}
+
+// Hash64 returns the i-th short hashed symbol's hash.
+// Note: here i is the index of short hashed symbols, not all symbols
+// (unlike other accessors).
+func (r *Reader) Hash64(i uint32) uint64 {
+	off := r.h.Offsets[BlkHash64] + uint32(i*Hash64Size)
+	return r.uint64At(off)
+}
+
+// Hash returns a pointer to the i-th hashed symbol's hash.
+// Note: here i is the index of hashed symbols, not all symbols
+// (unlike other accessors).
+func (r *Reader) Hash(i uint32) *HashType {
+	off := r.h.Offsets[BlkHash] + uint32(i*HashSize)
+	return (*HashType)(unsafe.Pointer(&r.b[off]))
 }
 
 // NReloc returns the number of relocations of the i-th symbol.

@@ -139,7 +139,11 @@ func (ctxt *Link) Float32Sym(f float32) *LSym {
 	name := fmt.Sprintf("$f32.%08x", i)
 	return ctxt.LookupInit(name, func(s *LSym) {
 		s.Size = 4
+		s.WriteFloat32(ctxt, 0, f)
+		s.Type = objabi.SRODATA
 		s.Set(AttrLocal, true)
+		s.Set(AttrContentAddressable, true)
+		ctxt.constSyms = append(ctxt.constSyms, s)
 	})
 }
 
@@ -148,7 +152,11 @@ func (ctxt *Link) Float64Sym(f float64) *LSym {
 	name := fmt.Sprintf("$f64.%016x", i)
 	return ctxt.LookupInit(name, func(s *LSym) {
 		s.Size = 8
+		s.WriteFloat64(ctxt, 0, f)
+		s.Type = objabi.SRODATA
 		s.Set(AttrLocal, true)
+		s.Set(AttrContentAddressable, true)
+		ctxt.constSyms = append(ctxt.constSyms, s)
 	})
 }
 
@@ -156,7 +164,11 @@ func (ctxt *Link) Int64Sym(i int64) *LSym {
 	name := fmt.Sprintf("$i64.%016x", uint64(i))
 	return ctxt.LookupInit(name, func(s *LSym) {
 		s.Size = 8
+		s.WriteInt(ctxt, 0, 8, i)
+		s.Type = objabi.SRODATA
 		s.Set(AttrLocal, true)
+		s.Set(AttrContentAddressable, true)
+		ctxt.constSyms = append(ctxt.constSyms, s)
 	})
 }
 
@@ -174,13 +186,41 @@ func (ctxt *Link) NumberSyms() {
 		})
 	}
 
+	// Constant symbols are created late in the concurrent phase. Sort them
+	// to ensure a deterministic order.
+	sort.Slice(ctxt.constSyms, func(i, j int) bool {
+		return ctxt.constSyms[i].Name < ctxt.constSyms[j].Name
+	})
+	ctxt.Data = append(ctxt.Data, ctxt.constSyms...)
+	ctxt.constSyms = nil
+
 	ctxt.pkgIdx = make(map[string]int32)
 	ctxt.defs = []*LSym{}
+	ctxt.hashed64defs = []*LSym{}
+	ctxt.hasheddefs = []*LSym{}
 	ctxt.nonpkgdefs = []*LSym{}
 
-	var idx, nonpkgidx int32 = 0, 0
+	var idx, hashedidx, hashed64idx, nonpkgidx int32
 	ctxt.traverseSyms(traverseDefs, func(s *LSym) {
-		if isNonPkgSym(ctxt, s) {
+		if s.ContentAddressable() {
+			if len(s.P) <= 8 {
+				s.PkgIdx = goobj2.PkgIdxHashed64
+				s.SymIdx = hashed64idx
+				if hashed64idx != int32(len(ctxt.hashed64defs)) {
+					panic("bad index")
+				}
+				ctxt.hashed64defs = append(ctxt.hashed64defs, s)
+				hashed64idx++
+			} else {
+				s.PkgIdx = goobj2.PkgIdxHashed
+				s.SymIdx = hashedidx
+				if hashedidx != int32(len(ctxt.hasheddefs)) {
+					panic("bad index")
+				}
+				ctxt.hasheddefs = append(ctxt.hasheddefs, s)
+				hashedidx++
+			}
+		} else if isNonPkgSym(ctxt, s) {
 			s.PkgIdx = goobj2.PkgIdxNone
 			s.SymIdx = nonpkgidx
 			if nonpkgidx != int32(len(ctxt.nonpkgdefs)) {
@@ -218,6 +258,10 @@ func (ctxt *Link) NumberSyms() {
 			}
 		}
 		pkg := rs.Pkg
+		if rs.ContentAddressable() {
+			// for now, only support content-addressable symbols that are always locally defined.
+			panic("hashed refs unsupported for now")
+		}
 		if pkg == "" || pkg == "\"\"" || pkg == "_" || !rs.Indexed() {
 			rs.PkgIdx = goobj2.PkgIdxNone
 			rs.SymIdx = nonpkgidx

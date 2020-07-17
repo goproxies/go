@@ -55,8 +55,12 @@ func (r *objReader) readNew() {
 				panic("bad sym ref")
 			}
 			return SymID{}
-		case goobj2.PkgIdxNone:
+		case goobj2.PkgIdxHashed64:
 			i = s.SymIdx + uint32(rr.NSym())
+		case goobj2.PkgIdxHashed:
+			i = s.SymIdx + uint32(rr.NSym()+rr.NHashed64def())
+		case goobj2.PkgIdxNone:
+			i = s.SymIdx + uint32(rr.NSym()+rr.NHashed64def()+rr.NHasheddef())
 		case goobj2.PkgIdxBuiltin:
 			name, abi := goobj2.BuiltinName(int(s.SymIdx))
 			return SymID{name, int64(abi)}
@@ -73,8 +77,8 @@ func (r *objReader) readNew() {
 
 	// Symbols
 	pcdataBase := start + rr.PcdataBase()
-	n := uint32(rr.NSym() + rr.NNonpkgdef() + rr.NNonpkgref())
-	ndef := uint32(rr.NSym() + rr.NNonpkgdef())
+	ndef := uint32(rr.NSym() + rr.NHashed64def() + rr.NHasheddef() + rr.NNonpkgdef())
+	n := ndef + uint32(rr.NNonpkgref())
 	for i := uint32(0); i < n; i++ {
 		osym := rr.Sym(i)
 		if osym.Name(rr) == "" {
