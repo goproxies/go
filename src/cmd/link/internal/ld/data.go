@@ -159,7 +159,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 	target := st.target
 	syms := st.syms
 	var extRelocs []loader.ExtReloc
-	if target.IsExternal() && !(target.IsAMD64() && target.IsELF) {
+	if target.IsExternal() && !target.StreamExtRelocs() {
 		// preallocate a slice conservatively assuming that all
 		// relocs will require an external reloc
 		extRelocs = st.preallocExtRelocSlice(relocs.Count())
@@ -264,7 +264,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 				o = int64(target.Arch.ByteOrder.Uint64(P[off:]))
 			}
 			var rp *loader.ExtReloc
-			if target.IsExternal() {
+			if target.IsExternal() && !target.StreamExtRelocs() {
 				// Don't pass &rr directly to Archreloc, which will escape rr
 				// even if this case is not taken. Instead, as Archreloc will
 				// likely return true, we speculatively add rr to extRelocs
@@ -274,12 +274,16 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 			}
 			out, nExtReloc, ok := thearch.Archreloc(target, ldr, syms, r, rp, s, o)
 			if target.IsExternal() {
-				if nExtReloc == 0 {
-					// No external relocation needed. Speculation failed. Undo the append.
-					extRelocs = extRelocs[:len(extRelocs)-1]
+				if target.StreamExtRelocs() {
+					extraExtReloc += nExtReloc
 				} else {
-					// Account for the difference between host relocations and Go relocations.
-					extraExtReloc += nExtReloc - 1
+					if nExtReloc == 0 {
+						// No external relocation needed. Speculation failed. Undo the append.
+						extRelocs = extRelocs[:len(extRelocs)-1]
+					} else {
+						// Account for the difference between host relocations and Go relocations.
+						extraExtReloc += nExtReloc - 1
+					}
 				}
 			}
 			needExtReloc = false // already appended
@@ -592,14 +596,14 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 
 	addExtReloc:
 		if needExtReloc {
-			if target.IsAMD64() && target.IsELF {
+			if target.StreamExtRelocs() {
 				extraExtReloc++
 			} else {
 				extRelocs = append(extRelocs, rr)
 			}
 		}
 	}
-	if target.IsExternal() && target.IsAMD64() && target.IsELF {
+	if target.IsExternal() && target.StreamExtRelocs() {
 		// On AMD64 ELF, we'll stream out the external relocations in elfrelocsect
 		// and we only need the count here.
 		// TODO: just count, but not compute the external relocations. For now it
@@ -638,8 +642,7 @@ func extreloc(ctxt *Link, ldr *loader.Loader, s loader.Sym, r loader.Reloc2, ri 
 
 	switch rt {
 	default:
-		// TODO: handle arch-specific relocations
-		panic("unsupported")
+		return thearch.Extreloc(&target, ldr, r, s)
 
 	case objabi.R_TLS_LE, objabi.R_TLS_IE:
 		if target.IsElf() {
@@ -1023,9 +1026,9 @@ func writeBlock(ctxt *Link, out *OutBuf, ldr *loader.Loader, syms []loader.Sym, 
 			out.WriteStringPad("", int(val-addr), pad)
 			addr = val
 		}
-		out.WriteSym(ldr, s)
-		st.relocsym(s, ldr.OutData(s))
-		addr += int64(len(ldr.Data(s)))
+		P := out.WriteSym(ldr, s)
+		st.relocsym(s, P)
+		addr += int64(len(P))
 		siz := ldr.SymSize(s)
 		if addr < val+siz {
 			out.WriteStringPad("", int(val+siz-addr), pad)
@@ -2674,8 +2677,8 @@ func compressSyms(ctxt *Link, syms []loader.Sym) []byte {
 		if relocs.Count() != 0 {
 			relocbuf = append(relocbuf[:0], P...)
 			P = relocbuf
+			st.relocsym(s, P)
 		}
-		st.relocsym(s, P)
 		if _, err := z.Write(P); err != nil {
 			log.Fatalf("compression failed: %s", err)
 		}

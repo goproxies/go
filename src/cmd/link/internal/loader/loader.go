@@ -238,7 +238,6 @@ type Loader struct {
 
 	align []uint8 // symbol 2^N alignment, indexed by global index
 
-	outdata   [][]byte     // symbol's data in the output buffer
 	extRelocs [][]ExtReloc // symbol's external relocations
 
 	itablink         map[Sym]struct{} // itablink[j] defined if j is go.itablink.*
@@ -434,24 +433,46 @@ func (l *Loader) addSym(name string, ver int, r *oReader, li uint32, kind int, o
 		l.symsByName[ver][name] = i
 		addToGlobal()
 		return i, true
-	case hashed64Def:
+	case hashed64Def, hashedDef:
 		// Hashed (content-addressable) symbol. Check the hash
 		// but don't add to name lookup table, as they are not
 		// referenced by name. Also no need to do overwriting
 		// check, as same hash indicates same content.
-		hash := r.Hash64(li - uint32(r.ndef))
+		var checkHash func() (symSizeAlign, bool)
+		var addToHashMap func(symSizeAlign)
+		var h64 uint64         // only used for hashed64Def
+		var h *goobj2.HashType // only used for hashedDef
+		if kind == hashed64Def {
+			checkHash = func() (symSizeAlign, bool) {
+				h64 = r.Hash64(li - uint32(r.ndef))
+				s, existed := l.hashed64Syms[h64]
+				return s, existed
+			}
+			addToHashMap = func(ss symSizeAlign) { l.hashed64Syms[h64] = ss }
+		} else {
+			checkHash = func() (symSizeAlign, bool) {
+				h = r.Hash(li - uint32(r.ndef+r.nhashed64def))
+				s, existed := l.hashedSyms[*h]
+				return s, existed
+			}
+			addToHashMap = func(ss symSizeAlign) { l.hashedSyms[*h] = ss }
+		}
 		siz := osym.Siz()
 		align := osym.Align()
-		if s, existed := l.hashed64Syms[hash]; existed {
-			// For short symbols, the content hash is the identity function of the
-			// 8 bytes, and trailing zeros doesn't change the hash value, e.g.
+		if s, existed := checkHash(); existed {
+			// The content hash is built from symbol data and relocations. In the
+			// object file, the symbol data may not always contain trailing zeros,
+			// e.g. for [5]int{1,2,3} and [100]int{1,2,3}, the data is same
+			// (although the size is different).
+			// Also, for short symbols, the content hash is the identity function of
+			// the 8 bytes, and trailing zeros doesn't change the hash value, e.g.
 			// hash("A") == hash("A\0\0\0").
 			// So when two symbols have the same hash, we need to use the one with
-			// larget size.
+			// larger size.
 			if siz <= s.size {
 				if align > s.align { // we need to use the biggest alignment
 					l.SetSymAlign(s.sym, int32(align))
-					l.hashed64Syms[hash] = symSizeAlign{s.sym, s.size, align}
+					addToHashMap(symSizeAlign{s.sym, s.size, align})
 				}
 			} else {
 				// New symbol has larger size, use the new one. Rewrite the index mapping.
@@ -460,34 +481,11 @@ func (l *Loader) addSym(name string, ver int, r *oReader, li uint32, kind int, o
 					align = s.align // keep the biggest alignment
 					l.SetSymAlign(s.sym, int32(align))
 				}
-				l.hashed64Syms[hash] = symSizeAlign{s.sym, siz, align}
+				addToHashMap(symSizeAlign{s.sym, siz, align})
 			}
 			return s.sym, false
 		}
-		l.hashed64Syms[hash] = symSizeAlign{i, siz, align}
-		addToGlobal()
-		return i, true
-	case hashedDef:
-		// Hashed (content-addressable) symbol. Check the hash
-		// but don't add to name lookup table, as they are not
-		// referenced by name. Also no need to do overwriting
-		// check, as same hash indicates same content.
-		hash := r.Hash(li - uint32(r.ndef+r.nhashed64def))
-		if s, existed := l.hashedSyms[*hash]; existed {
-			if s.size != osym.Siz() {
-				fmt.Printf("hash collision: %v (size %d) and %v (size %d), hash %x\n", l.SymName(s.sym), s.size, osym.Name(r.Reader), osym.Siz(), *hash)
-				panic("hash collision")
-			}
-			if l.flags&FlagStrictDups != 0 {
-				l.checkdup(name, r, li, s.sym)
-			}
-			if a := osym.Align(); a > s.align { // we need to use the biggest alignment
-				l.SetSymAlign(s.sym, int32(a))
-				l.hashedSyms[*hash] = symSizeAlign{s.sym, s.size, a}
-			}
-			return s.sym, false
-		}
-		l.hashedSyms[*hash] = symSizeAlign{i, osym.Siz(), osym.Align()}
+		addToHashMap(symSizeAlign{i, siz, align})
 		addToGlobal()
 		return i, true
 	}
@@ -1231,30 +1229,16 @@ func (l *Loader) Data(i Sym) []byte {
 	return r.Data(li)
 }
 
-// Returns the data of the i-th symbol in the output buffer.
-func (l *Loader) OutData(i Sym) []byte {
-	if int(i) < len(l.outdata) && l.outdata[i] != nil {
-		return l.outdata[i]
-	}
-	return l.Data(i)
-}
-
-// SetOutData sets the position of the data of the i-th symbol in the output buffer.
+// FreeData clears the symbol data of an external symbol, allowing the memory
+// to be freed earlier. No-op for non-external symbols.
 // i is global index.
-func (l *Loader) SetOutData(i Sym, data []byte) {
+func (l *Loader) FreeData(i Sym) {
 	if l.IsExternal(i) {
 		pp := l.getPayload(i)
 		if pp != nil {
-			pp.data = data
-			return
+			pp.data = nil
 		}
 	}
-	l.outdata[i] = data
-}
-
-// InitOutData initializes the slice used to store symbol output data.
-func (l *Loader) InitOutData() {
-	l.outdata = make([][]byte, l.extStart)
 }
 
 // SetExtRelocs sets the external relocations of the i-th symbol. i is global index.

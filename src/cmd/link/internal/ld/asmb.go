@@ -18,8 +18,7 @@ import (
 //  - writing out the architecture specific pieces.
 // This function handles the first part.
 func asmb(ctxt *Link) {
-	ctxt.loader.InitOutData()
-	if ctxt.IsExternal() && !(ctxt.IsAMD64() && ctxt.IsELF) {
+	if ctxt.IsExternal() && !ctxt.StreamExtRelocs() {
 		ctxt.loader.InitExtRelocs()
 	}
 
