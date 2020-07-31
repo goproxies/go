@@ -75,25 +75,19 @@ func gentext(ctxt *ld.Link, ldr *loader.Loader) {
 	o(0xe08f0000)
 
 	o(0xeafffffe)
-	rel := loader.Reloc{
-		Off:  8,
-		Size: 4,
-		Type: objabi.R_CALLARM,
-		Sym:  addmoduledata,
-		Add:  0xeafffffe, // vomit
-	}
-	initfunc.AddReloc(rel)
+	rel, _ := initfunc.AddRel(objabi.R_CALLARM)
+	rel.SetOff(8)
+	rel.SetSiz(4)
+	rel.SetSym(addmoduledata)
+	rel.SetAdd(0xeafffffe) // vomit
 
 	o(0x00000000)
 
-	rel2 := loader.Reloc{
-		Off:  12,
-		Size: 4,
-		Type: objabi.R_PCREL,
-		Sym:  ctxt.Moduledata,
-		Add:  4,
-	}
-	initfunc.AddReloc(rel2)
+	rel2, _ := initfunc.AddRel(objabi.R_PCREL)
+	rel2.SetOff(12)
+	rel2.SetSiz(4)
+	rel2.SetSym(ctxt.Moduledata)
+	rel2.SetAdd(4)
 }
 
 // Preserve highest 8 bits of a, and do addition to lower 24-bit
@@ -102,7 +96,7 @@ func braddoff(a int32, b int32) int32 {
 	return int32((uint32(a))&0xff000000 | 0x00ffffff&uint32(a+b))
 }
 
-func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc2, rIdx int) bool {
+func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc, rIdx int) bool {
 
 	targ := r.Sym()
 	var targType sym.SymKind
@@ -215,7 +209,7 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 
 	// Reread the reloc to incorporate any changes in type above.
 	relocs := ldr.Relocs(s)
-	r = relocs.At2(rIdx)
+	r = relocs.At(rIdx)
 
 	switch r.Type() {
 	case objabi.R_CALLARM:
@@ -248,12 +242,12 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 	return false
 }
 
-func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, ri int, sectoff int64) bool {
 	out.Write32(uint32(sectoff))
 
 	elfsym := ld.ElfSymForReloc(ctxt, r.Xsym)
-	siz := r.Siz()
-	switch r.Type() {
+	siz := r.Size
+	switch r.Type {
 	default:
 		return false
 	case objabi.R_ADDR, objabi.R_DWARFSECREF:
@@ -270,7 +264,9 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 		}
 	case objabi.R_CALLARM:
 		if siz == 4 {
-			if r.Add()&0xff000000 == 0xeb000000 { // BL
+			relocs := ldr.Relocs(s)
+			r := relocs.At(ri)
+			if r.Add()&0xff000000 == 0xeb000000 { // BL // TODO: using r.Add here is bad (issue 19811)
 				out.Write32(uint32(elf.R_ARM_CALL) | uint32(elfsym)<<8)
 			} else {
 				out.Write32(uint32(elf.R_ARM_JUMP24) | uint32(elfsym)<<8)
@@ -318,13 +314,13 @@ func elfsetupplt(ctxt *ld.Link, plt, got *loader.SymbolBuilder, dynamic loader.S
 	}
 }
 
-func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtRelocView, int64) bool {
+func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtReloc, int64) bool {
 	return false
 }
 
-func pereloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func pereloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, sectoff int64) bool {
 	rs := r.Xsym
-	rt := r.Type()
+	rt := r.Type
 
 	if ldr.SymDynid(rs) < 0 {
 		ldr.Errorf(s, "reloc %d (%s) to non-coff symbol %s type=%d (%s)", rt, sym.RelocName(arch, rt), ldr.SymName(rs), ldr.SymType(rs), ldr.SymType(rs))
@@ -371,7 +367,7 @@ func immrot(v uint32) uint32 {
 // Convert the direct jump relocation r to refer to a trampoline if the target is too far
 func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 	relocs := ldr.Relocs(s)
-	r := relocs.At2(ri)
+	r := relocs.At(ri)
 	switch r.Type() {
 	case objabi.R_CALLARM:
 		// r.Add is the instruction
@@ -427,7 +423,7 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 			// modify reloc to point to tramp, which will be resolved later
 			sb := ldr.MakeSymbolUpdater(s)
 			relocs := sb.Relocs()
-			r := relocs.At2(ri)
+			r := relocs.At(ri)
 			r.SetSym(tramp)
 			r.SetAdd(r.Add()&0xff000000 | 0xfffffe) // clear the offset embedded in the instruction
 		}
@@ -450,14 +446,11 @@ func gentramp(arch *sys.Arch, linkmode ld.LinkMode, ldr *loader.Loader, tramp *l
 	tramp.SetData(P)
 
 	if linkmode == ld.LinkExternal {
-		r := loader.Reloc{
-			Off:  8,
-			Type: objabi.R_ADDR,
-			Size: 4,
-			Sym:  target,
-			Add:  offset,
-		}
-		tramp.AddReloc(r)
+		r, _ := tramp.AddRel(objabi.R_ADDR)
+		r.SetOff(8)
+		r.SetSiz(4)
+		r.SetSym(target)
+		r.SetAdd(offset)
 	}
 }
 
@@ -475,14 +468,11 @@ func gentramppic(arch *sys.Arch, tramp *loader.SymbolBuilder, target loader.Sym,
 	arch.ByteOrder.PutUint32(P[12:], o4)
 	tramp.SetData(P)
 
-	r := loader.Reloc{
-		Off:  12,
-		Type: objabi.R_PCREL,
-		Size: 4,
-		Sym:  target,
-		Add:  offset + 4,
-	}
-	tramp.AddReloc(r)
+	r, _ := tramp.AddRel(objabi.R_PCREL)
+	r.SetOff(12)
+	r.SetSiz(4)
+	r.SetSym(target)
+	r.SetAdd(offset + 4)
 }
 
 // generate a trampoline to target+offset in dynlink mode (using GOT)
@@ -513,22 +503,19 @@ func gentrampdyn(arch *sys.Arch, tramp *loader.SymbolBuilder, target loader.Sym,
 	}
 	tramp.SetData(P)
 
-	r := loader.Reloc{
-		Off:  16,
-		Type: objabi.R_GOTPCREL,
-		Size: 4,
-		Sym:  target,
-		Add:  8,
-	}
+	r, _ := tramp.AddRel(objabi.R_GOTPCREL)
+	r.SetOff(16)
+	r.SetSiz(4)
+	r.SetSym(target)
+	r.SetAdd(8)
 	if offset != 0 {
 		// increase reloc offset by 4 as we inserted an ADD instruction
-		r.Off = 20
-		r.Add = 12
+		r.SetOff(20)
+		r.SetAdd(12)
 	}
-	tramp.AddReloc(r)
 }
 
-func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc2, s loader.Sym, val int64) (o int64, nExtReloc int, ok bool) {
+func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc, s loader.Sym, val int64) (o int64, nExtReloc int, ok bool) {
 	rs := r.Sym()
 	rs = ldr.ResolveABIAlias(rs)
 	if target.IsExternal() {
@@ -572,12 +559,12 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 	return val, 0, false
 }
 
-func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc2, sym.RelocVariant, loader.Sym, int64) int64 {
+func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc, sym.RelocVariant, loader.Sym, int64) int64 {
 	log.Fatalf("unexpected relocation variant")
 	return -1
 }
 
-func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc2, s loader.Sym) (loader.ExtReloc, bool) {
+func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc, s loader.Sym) (loader.ExtReloc, bool) {
 	rs := ldr.ResolveABIAlias(r.Sym())
 	var rr loader.ExtReloc
 	switch r.Type() {
@@ -590,6 +577,8 @@ func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc2, s loader.S
 			ldr.Errorf(s, "missing section for %s", ldr.SymName(rs))
 		}
 		rr.Xsym = rs
+		rr.Type = r.Type()
+		rr.Size = r.Siz()
 		return rr, true
 	}
 	return rr, false

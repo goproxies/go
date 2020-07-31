@@ -75,7 +75,7 @@ func maxSizeTrampolinesPPC64(ldr *loader.Loader, s loader.Sym, isTramp bool) uin
 	n := uint64(0)
 	relocs := ldr.Relocs(s)
 	for ri := 0; ri < relocs.Count(); ri++ {
-		r := relocs.At2(ri)
+		r := relocs.At(ri)
 		if r.Type().IsDirectCallOrJump() {
 			n++
 		}
@@ -96,7 +96,7 @@ func trampoline(ctxt *Link, s loader.Sym) {
 	ldr := ctxt.loader
 	relocs := ldr.Relocs(s)
 	for ri := 0; ri < relocs.Count(); ri++ {
-		r := relocs.At2(ri)
+		r := relocs.At(ri)
 		if !r.Type().IsDirectCallOrJump() {
 			continue
 		}
@@ -160,7 +160,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 	syms := st.syms
 	nExtReloc := 0 // number of external relocations
 	for ri := 0; ri < relocs.Count(); ri++ {
-		r := relocs.At2(ri)
+		r := relocs.At(ri)
 		off := r.Off()
 		siz := int32(r.Siz())
 		rs := r.Sym()
@@ -538,7 +538,7 @@ func (st *relocSymState) relocsym(s loader.Sym, P []byte) {
 }
 
 // Convert a Go relocation to an external relocation.
-func extreloc(ctxt *Link, ldr *loader.Loader, s loader.Sym, r loader.Reloc2, ri int) (loader.ExtReloc, bool) {
+func extreloc(ctxt *Link, ldr *loader.Loader, s loader.Sym, r loader.Reloc) (loader.ExtReloc, bool) {
 	var rr loader.ExtReloc
 	target := &ctxt.Target
 	siz := int32(r.Siz())
@@ -550,8 +550,8 @@ func extreloc(ctxt *Link, ldr *loader.Loader, s loader.Sym, r loader.Reloc2, ri 
 	if rt >= objabi.ElfRelocOffset {
 		return rr, false
 	}
-
-	rr.Idx = ri
+	rr.Type = rt
+	rr.Size = uint8(siz)
 
 	// TODO(mundaym): remove this special case - see issue 14218.
 	if target.IsS390X() {
@@ -627,9 +627,7 @@ func extreloc(ctxt *Link, ldr *loader.Loader, s loader.Sym, r loader.Reloc2, ri 
 		return rr, false
 
 	case objabi.R_XCOFFREF:
-		rs := ldr.ResolveABIAlias(r.Sym())
-		rr.Xsym = rs
-		rr.Xadd = r.Add()
+		return ExtrelocSimple(ldr, r), true
 
 	// These reloc types don't need external relocations.
 	case objabi.R_ADDROFF, objabi.R_WEAKADDROFF, objabi.R_METHODOFF, objabi.R_ADDRCUOFF,
@@ -637,6 +635,36 @@ func extreloc(ctxt *Link, ldr *loader.Loader, s loader.Sym, r loader.Reloc2, ri 
 		return rr, false
 	}
 	return rr, true
+}
+
+// ExtrelocSimple creates a simple external relocation from r, with the same
+// symbol and addend.
+func ExtrelocSimple(ldr *loader.Loader, r loader.Reloc) loader.ExtReloc {
+	var rr loader.ExtReloc
+	rs := ldr.ResolveABIAlias(r.Sym())
+	rr.Xsym = rs
+	rr.Xadd = r.Add()
+	rr.Type = r.Type()
+	rr.Size = r.Siz()
+	return rr
+}
+
+// ExtrelocViaOuterSym creates an external relocation from r targeting the
+// outer symbol and folding the subsymbol's offset into the addend.
+func ExtrelocViaOuterSym(ldr *loader.Loader, r loader.Reloc, s loader.Sym) loader.ExtReloc {
+	// set up addend for eventual relocation via outer symbol.
+	var rr loader.ExtReloc
+	rs := ldr.ResolveABIAlias(r.Sym())
+	rs, off := FoldSubSymbolOffset(ldr, rs)
+	rr.Xadd = r.Add() + off
+	rst := ldr.SymType(rs)
+	if rst != sym.SHOSTOBJ && rst != sym.SDYNIMPORT && rst != sym.SUNDEFEXT && ldr.SymSect(rs) == nil {
+		ldr.Errorf(s, "missing section for %s", ldr.SymName(rs))
+	}
+	rr.Xsym = rs
+	rr.Type = r.Type()
+	rr.Size = r.Siz()
+	return rr
 }
 
 // relocSymState hold state information needed when making a series of
@@ -669,7 +697,7 @@ func windynrelocsym(ctxt *Link, rel *loader.SymbolBuilder, s loader.Sym) {
 	var su *loader.SymbolBuilder
 	relocs := ctxt.loader.Relocs(s)
 	for ri := 0; ri < relocs.Count(); ri++ {
-		r := relocs.At2(ri)
+		r := relocs.At(ri)
 		targ := r.Sym()
 		if targ == 0 {
 			continue
@@ -746,7 +774,7 @@ func dynrelocsym(ctxt *Link, s loader.Sym) {
 	syms := &ctxt.ArchSyms
 	relocs := ldr.Relocs(s)
 	for ri := 0; ri < relocs.Count(); ri++ {
-		r := relocs.At2(ri)
+		r := relocs.At(ri)
 		if ctxt.BuildMode == BuildModePIE && ctxt.LinkMode == LinkInternal {
 			// It's expected that some relocations will be done
 			// later by relocsym (R_TLS_LE, R_ADDROFF), so
@@ -1035,7 +1063,7 @@ func addstrdata(arch *sys.Arch, l *loader.Loader, name, value string) {
 	bld.SetSize(0)
 	bld.SetData(make([]byte, 0, arch.PtrSize*2))
 	bld.SetReadOnly(false)
-	bld.SetRelocs(nil)
+	bld.ResetRelocs()
 	bld.AddAddrPlus(arch, sbld.Sym(), 0)
 	bld.AddUint(arch, uint64(len(value)))
 }
@@ -1893,6 +1921,8 @@ func (state *dodataState) allocateDataSections(ctxt *Link) {
 	/* gopclntab */
 	sect = state.allocateNamedSectionAndAssignSyms(seg, genrelrosecname(".gopclntab"), sym.SPCLNTAB, sym.SRODATA, relroSecPerm)
 	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.pclntab", 0), sect)
+	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.pcheader", 0), sect)
+	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.pclntab_old", 0), sect)
 	ldr.SetSymSect(ldr.LookupOrCreateSym("runtime.epclntab", 0), sect)
 
 	// 6g uses 4-byte relocation offsets, so the entire segment must fit in 32 bits.
@@ -2449,6 +2479,8 @@ func (ctxt *Link) address() []*sym.Segment {
 	ctxt.xdefine("runtime.symtab", sym.SRODATA, int64(symtab.Vaddr))
 	ctxt.xdefine("runtime.esymtab", sym.SRODATA, int64(symtab.Vaddr+symtab.Length))
 	ctxt.xdefine("runtime.pclntab", sym.SRODATA, int64(pclntab.Vaddr))
+	pcvar := ctxt.xdefine("runtime.pcheader", sym.SRODATA, int64(pclntab.Vaddr))
+	ctxt.xdefine("runtime.pclntab_old", sym.SRODATA, int64(pclntab.Vaddr)+ldr.SymSize(pcvar))
 	ctxt.xdefine("runtime.epclntab", sym.SRODATA, int64(pclntab.Vaddr+pclntab.Length))
 	ctxt.xdefine("runtime.noptrdata", sym.SNOPTRDATA, int64(noptr.Vaddr))
 	ctxt.xdefine("runtime.enoptrdata", sym.SNOPTRDATA, int64(noptr.Vaddr+noptr.Length))

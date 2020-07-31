@@ -521,8 +521,8 @@ func (f *peFile) emitRelocations(ctxt *Link) {
 			// to stream out.
 			relocs := ldr.Relocs(s)
 			for ri := 0; ri < relocs.Count(); ri++ {
-				r := relocs.At2(ri)
-				rr, ok := extreloc(ctxt, ldr, s, r, ri)
+				r := relocs.At(ri)
+				rr, ok := extreloc(ctxt, ldr, s, r)
 				if !ok {
 					continue
 				}
@@ -533,8 +533,7 @@ func (f *peFile) emitRelocations(ctxt *Link) {
 				if ldr.SymDynid(rr.Xsym) < 0 {
 					ctxt.Errorf(s, "reloc %d to non-coff symbol %s (outer=%s) %d", r.Type(), ldr.SymName(r.Sym()), ldr.SymName(rr.Xsym), ldr.SymType(r.Sym()))
 				}
-				rv := loader.ExtRelocView{Reloc2: r, ExtReloc: rr}
-				if !thearch.PEreloc1(ctxt.Arch, ctxt.Out, ldr, s, rv, int64(uint64(ldr.SymValue(s)+int64(r.Off()))-base)) {
+				if !thearch.PEreloc1(ctxt.Arch, ctxt.Out, ldr, s, rr, int64(uint64(ldr.SymValue(s)+int64(r.Off()))-base)) {
 					ctxt.Errorf(s, "unsupported obj reloc %d/%d to %s", r.Type(), r.Siz(), ldr.SymName(r.Sym()))
 				}
 				nrelocs++
@@ -1116,7 +1115,9 @@ func initdynimport(ctxt *Link) *Dll {
 				}
 				dynSym := ldr.CreateSymForUpdate(dynName, 0)
 				dynSym.SetType(sym.SHOSTOBJ)
-				sb.AddReloc(loader.Reloc{Sym: dynSym.Sym(), Type: objabi.R_ADDR, Off: 0, Size: uint8(ctxt.Arch.PtrSize)})
+				r, _ := sb.AddRel(objabi.R_ADDR)
+				r.SetSym(dynSym.Sym())
+				r.SetSiz(uint8(ctxt.Arch.PtrSize))
 			}
 		}
 	} else {
@@ -1380,7 +1381,7 @@ func (rt *peBaseRelocTable) init(ctxt *Link) {
 	rt.blocks = make(map[uint32]peBaseRelocBlock)
 }
 
-func (rt *peBaseRelocTable) addentry(ldr *loader.Loader, s loader.Sym, r *loader.Reloc2) {
+func (rt *peBaseRelocTable) addentry(ldr *loader.Loader, s loader.Sym, r *loader.Reloc) {
 	// pageSize is the size in bytes of a page
 	// described by a base relocation block.
 	const pageSize = 0x1000
@@ -1435,7 +1436,7 @@ func (rt *peBaseRelocTable) write(ctxt *Link) {
 func addPEBaseRelocSym(ldr *loader.Loader, s loader.Sym, rt *peBaseRelocTable) {
 	relocs := ldr.Relocs(s)
 	for ri := 0; ri < relocs.Count(); ri++ {
-		r := relocs.At2(ri)
+		r := relocs.At(ri)
 		if r.Type() >= objabi.ElfRelocOffset {
 			continue
 		}
@@ -1529,7 +1530,7 @@ func addpersrc(ctxt *Link) {
 	// relocation
 	relocs := ctxt.loader.Relocs(rsrcsym)
 	for i := 0; i < relocs.Count(); i++ {
-		r := relocs.At2(i)
+		r := relocs.At(i)
 		p := data[r.Off():]
 		val := uint32(int64(h.virtualAddress) + r.Add())
 

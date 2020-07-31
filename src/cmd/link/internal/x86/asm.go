@@ -128,7 +128,7 @@ func gentext(ctxt *ld.Link, ldr *loader.Loader) {
 	o(0xc3)
 }
 
-func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc2, rIdx int) bool {
+func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc, rIdx int) bool {
 	targ := r.Sym()
 	var targType sym.SymKind
 	if targ != 0 {
@@ -280,7 +280,7 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 
 	// Reread the reloc to incorporate any changes in type above.
 	relocs := ldr.Relocs(s)
-	r = relocs.At2(rIdx)
+	r = relocs.At(rIdx)
 
 	switch r.Type() {
 	case objabi.R_CALL,
@@ -314,12 +314,12 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 	return false
 }
 
-func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, ri int, sectoff int64) bool {
 	out.Write32(uint32(sectoff))
 
 	elfsym := ld.ElfSymForReloc(ctxt, r.Xsym)
-	siz := r.Siz()
-	switch r.Type() {
+	siz := r.Size
+	switch r.Type {
 	default:
 		return false
 	case objabi.R_ADDR, objabi.R_DWARFSECREF:
@@ -373,15 +373,15 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 	return true
 }
 
-func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtRelocView, int64) bool {
+func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtReloc, int64) bool {
 	return false
 }
 
-func pereloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func pereloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, sectoff int64) bool {
 	var v uint32
 
 	rs := r.Xsym
-	rt := r.Type()
+	rt := r.Type
 
 	if ldr.SymDynid(rs) < 0 {
 		ldr.Errorf(s, "reloc %d (%s) to non-coff symbol %s type=%d (%s)", rt, sym.RelocName(arch, rt), ldr.SymName(rs), ldr.SymType(rs), ldr.SymType(rs))
@@ -411,11 +411,11 @@ func pereloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 	return true
 }
 
-func archreloc(*ld.Target, *loader.Loader, *ld.ArchSyms, loader.Reloc2, loader.Sym, int64) (int64, int, bool) {
+func archreloc(*ld.Target, *loader.Loader, *ld.ArchSyms, loader.Reloc, loader.Sym, int64) (int64, int, bool) {
 	return -1, 0, false
 }
 
-func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc2, sym.RelocVariant, loader.Sym, int64) int64 {
+func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc, sym.RelocVariant, loader.Sym, int64) int64 {
 	log.Fatalf("unexpected relocation variant")
 	return -1
 }

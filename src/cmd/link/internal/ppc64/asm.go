@@ -96,7 +96,7 @@ func genplt(ctxt *ld.Link, ldr *loader.Loader) {
 	for _, s := range ctxt.Textp {
 		relocs := ldr.Relocs(s)
 		for i := 0; i < relocs.Count(); i++ {
-			r := relocs.At2(i)
+			r := relocs.At(i)
 			if r.Type() != objabi.ElfRelocOffset+objabi.RelocType(elf.R_PPC64_REL24) || ldr.SymType(r.Sym()) != sym.SDYNIMPORT {
 				continue
 			}
@@ -152,13 +152,10 @@ func genaddmoduledata(ctxt *ld.Link, ldr *loader.Loader) {
 
 	// addis r2, r12, .TOC.-func@ha
 	toc := ctxt.DotTOC[0]
-	rel1 := loader.Reloc{
-		Off:  0,
-		Size: 8,
-		Type: objabi.R_ADDRPOWER_PCREL,
-		Sym:  toc,
-	}
-	initfunc.AddReloc(rel1)
+	rel1, _ := initfunc.AddRel(objabi.R_ADDRPOWER_PCREL)
+	rel1.SetOff(0)
+	rel1.SetSiz(8)
+	rel1.SetSym(toc)
 	o(0x3c4c0000)
 	// addi r2, r2, .TOC.-func@l
 	o(0x38420000)
@@ -175,24 +172,18 @@ func genaddmoduledata(ctxt *ld.Link, ldr *loader.Loader) {
 	} else {
 		tgt = ldr.LookupOrCreateSym("runtime.firstmoduledata", 0)
 	}
-	rel2 := loader.Reloc{
-		Off:  int32(initfunc.Size()),
-		Size: 8,
-		Type: objabi.R_ADDRPOWER_GOT,
-		Sym:  tgt,
-	}
-	initfunc.AddReloc(rel2)
+	rel2, _ := initfunc.AddRel(objabi.R_ADDRPOWER_GOT)
+	rel2.SetOff(int32(initfunc.Size()))
+	rel2.SetSiz(8)
+	rel2.SetSym(tgt)
 	o(0x3c620000)
 	// ld r3, local.moduledata@got@l(r3)
 	o(0xe8630000)
 	// bl runtime.addmoduledata
-	rel3 := loader.Reloc{
-		Off:  int32(initfunc.Size()),
-		Size: 4,
-		Type: objabi.R_CALLPOWER,
-		Sym:  addmoduledata,
-	}
-	initfunc.AddReloc(rel3)
+	rel3, _ := initfunc.AddRel(objabi.R_CALLPOWER)
+	rel3.SetOff(int32(initfunc.Size()))
+	rel3.SetSiz(4)
+	rel3.SetSym(addmoduledata)
 	o(0x48000001)
 	// nop
 	o(0x60000000)
@@ -233,31 +224,25 @@ func gencallstub(ctxt *ld.Link, ldr *loader.Loader, abicase int, stub *loader.Sy
 	stub.AddUint32(ctxt.Arch, 0xf8410018) // std r2,24(r1)
 
 	// Load the function pointer from the PLT.
-	rel := loader.Reloc{
-		Off:  int32(stub.Size()),
-		Size: 2,
-		Add:  int64(ldr.SymPlt(targ)),
-		Type: objabi.R_POWER_TOC,
-		Sym:  plt,
-	}
+	rel, ri1 := stub.AddRel(objabi.R_POWER_TOC)
+	rel.SetOff(int32(stub.Size()))
+	rel.SetSiz(2)
+	rel.SetAdd(int64(ldr.SymPlt(targ)))
+	rel.SetSym(plt)
 	if ctxt.Arch.ByteOrder == binary.BigEndian {
-		rel.Off += int32(rel.Size)
+		rel.SetOff(rel.Off() + int32(rel.Siz()))
 	}
-	ri1 := stub.AddReloc(rel)
 	ldr.SetRelocVariant(stub.Sym(), int(ri1), sym.RV_POWER_HA)
 	stub.AddUint32(ctxt.Arch, 0x3d820000) // addis r12,r2,targ@plt@toc@ha
 
-	rel2 := loader.Reloc{
-		Off:  int32(stub.Size()),
-		Size: 2,
-		Add:  int64(ldr.SymPlt(targ)),
-		Type: objabi.R_POWER_TOC,
-		Sym:  plt,
-	}
+	rel2, ri2 := stub.AddRel(objabi.R_POWER_TOC)
+	rel2.SetOff(int32(stub.Size()))
+	rel2.SetSiz(2)
+	rel2.SetAdd(int64(ldr.SymPlt(targ)))
+	rel2.SetSym(plt)
 	if ctxt.Arch.ByteOrder == binary.BigEndian {
-		rel2.Off += int32(rel.Size)
+		rel2.SetOff(rel2.Off() + int32(rel2.Siz()))
 	}
-	ri2 := stub.AddReloc(rel2)
 	ldr.SetRelocVariant(stub.Sym(), int(ri2), sym.RV_POWER_LO)
 	stub.AddUint32(ctxt.Arch, 0xe98c0000) // ld r12,targ@plt@toc@l(r12)
 
@@ -266,7 +251,7 @@ func gencallstub(ctxt *ld.Link, ldr *loader.Loader, abicase int, stub *loader.Sy
 	stub.AddUint32(ctxt.Arch, 0x4e800420) // bctr
 }
 
-func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc2, rIdx int) bool {
+func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc, rIdx int) bool {
 	if target.IsElf() {
 		return addelfdynrel(target, ldr, syms, s, r, rIdx)
 	} else if target.IsAIX() {
@@ -275,7 +260,7 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 	return false
 }
 
-func addelfdynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc2, rIdx int) bool {
+func addelfdynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc, rIdx int) bool {
 	targ := r.Sym()
 	var targType sym.SymKind
 	if targ != 0 {
@@ -402,7 +387,7 @@ func addelfdynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s lo
 	return false
 }
 
-func xcoffreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func xcoffreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, sectoff int64) bool {
 	rs := r.Xsym
 
 	emitReloc := func(v uint16, off uint64) {
@@ -412,12 +397,12 @@ func xcoffreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sy
 	}
 
 	var v uint16
-	switch r.Type() {
+	switch r.Type {
 	default:
 		return false
 	case objabi.R_ADDR, objabi.R_DWARFSECREF:
 		v = ld.XCOFF_R_POS
-		if r.Siz() == 4 {
+		if r.Size == 4 {
 			v |= 0x1F << 8
 		} else {
 			v |= 0x3F << 8
@@ -430,7 +415,7 @@ func xcoffreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sy
 	case objabi.R_POWER_TLS_LE:
 		emitReloc(ld.XCOFF_R_TLS_LE|0x0F<<8, 2)
 	case objabi.R_CALLPOWER:
-		if r.Siz() != 4 {
+		if r.Size != 4 {
 			return false
 		}
 		emitReloc(ld.XCOFF_R_RBR|0x19<<8, 0)
@@ -441,9 +426,9 @@ func xcoffreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sy
 
 }
 
-func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, ri int, sectoff int64) bool {
 	// Beware that bit0~bit15 start from the third byte of a instruction in Big-Endian machines.
-	rt := r.Type()
+	rt := r.Type
 	if rt == objabi.R_ADDR || rt == objabi.R_POWER_TLS || rt == objabi.R_CALLPOWER {
 	} else {
 		if ctxt.Arch.ByteOrder == binary.BigEndian {
@@ -457,7 +442,7 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 	default:
 		return false
 	case objabi.R_ADDR, objabi.R_DWARFSECREF:
-		switch r.Siz() {
+		switch r.Size {
 		case 4:
 			out.Write64(uint64(elf.R_PPC64_ADDR32) | uint64(elfsym)<<32)
 		case 8:
@@ -506,7 +491,7 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 		out.Write64(uint64(sectoff + 4))
 		out.Write64(uint64(elf.R_PPC64_TOC16_LO_DS) | uint64(elfsym)<<32)
 	case objabi.R_CALLPOWER:
-		if r.Siz() != 4 {
+		if r.Size != 4 {
 			return false
 		}
 		out.Write64(uint64(elf.R_PPC64_REL24) | uint64(elfsym)<<32)
@@ -527,7 +512,7 @@ func elfsetupplt(ctxt *ld.Link, plt, got *loader.SymbolBuilder, dynamic loader.S
 	}
 }
 
-func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtRelocView, int64) bool {
+func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtReloc, int64) bool {
 	return false
 }
 
@@ -552,7 +537,7 @@ func symtoc(ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym) int64 {
 // default load instruction can be changed to an addi instruction and the
 // symbol address can be used directly.
 // This code is for AIX only.
-func archreloctoc(ldr *loader.Loader, target *ld.Target, syms *ld.ArchSyms, r loader.Reloc2, s loader.Sym, val int64) int64 {
+func archreloctoc(ldr *loader.Loader, target *ld.Target, syms *ld.ArchSyms, r loader.Reloc, s loader.Sym, val int64) int64 {
 	rs := ldr.ResolveABIAlias(r.Sym())
 	if target.IsLinux() {
 		ldr.Errorf(s, "archrelocaddr called for %s relocation\n", ldr.SymName(rs))
@@ -568,7 +553,7 @@ func archreloctoc(ldr *loader.Loader, target *ld.Target, syms *ld.ArchSyms, r lo
 	var t int64
 	useAddi := false
 	relocs := ldr.Relocs(rs)
-	tarSym := ldr.ResolveABIAlias(relocs.At2(0).Sym())
+	tarSym := ldr.ResolveABIAlias(relocs.At(0).Sym())
 
 	if target.IsInternal() && tarSym != 0 && ldr.AttrReachable(tarSym) && ldr.SymSect(tarSym).Seg == &ld.Segdata {
 		t = ldr.SymValue(tarSym) + r.Add() - ldr.SymValue(syms.TOC)
@@ -608,7 +593,7 @@ func archreloctoc(ldr *loader.Loader, target *ld.Target, syms *ld.ArchSyms, r lo
 
 // archrelocaddr relocates a symbol address.
 // This code is for AIX only.
-func archrelocaddr(ldr *loader.Loader, target *ld.Target, syms *ld.ArchSyms, r loader.Reloc2, s loader.Sym, val int64) int64 {
+func archrelocaddr(ldr *loader.Loader, target *ld.Target, syms *ld.ArchSyms, r loader.Reloc, s loader.Sym, val int64) int64 {
 	rs := ldr.ResolveABIAlias(r.Sym())
 	if target.IsAIX() {
 		ldr.Errorf(s, "archrelocaddr called for %s relocation\n", ldr.SymName(rs))
@@ -670,7 +655,7 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 	}
 
 	relocs := ldr.Relocs(s)
-	r := relocs.At2(ri)
+	r := relocs.At(ri)
 	t := ldr.SymValue(rs) + r.Add() - (ldr.SymValue(s) + int64(r.Off()))
 	switch r.Type() {
 	case objabi.R_CALLPOWER:
@@ -723,7 +708,7 @@ func trampoline(ctxt *ld.Link, ldr *loader.Loader, ri int, rs, s loader.Sym) {
 			}
 			sb := ldr.MakeSymbolUpdater(s)
 			relocs := sb.Relocs()
-			r := relocs.At2(ri)
+			r := relocs.At(ri)
 			r.SetSym(tramp)
 			r.SetAdd(0) // This was folded into the trampoline target address
 		}
@@ -751,13 +736,10 @@ func gentramp(ctxt *ld.Link, ldr *loader.Loader, tramp *loader.SymbolBuilder, ta
 		toctramp.SetType(sym.SXCOFFTOC)
 		toctramp.AddAddrPlus(ctxt.Arch, target, offset)
 
-		r := loader.Reloc{
-			Off:  0,
-			Type: objabi.R_ADDRPOWER_TOCREL_DS,
-			Size: 8, // generates 2 relocations:  HA + LO
-			Sym:  toctramp.Sym(),
-		}
-		tramp.AddReloc(r)
+		r, _ := tramp.AddRel(objabi.R_ADDRPOWER_TOCREL_DS)
+		r.SetOff(0)
+		r.SetSiz(8) // generates 2 relocations: HA + LO
+		r.SetSym(toctramp.Sym())
 	} else {
 		// Used for default build mode for an executable
 		// Address of the call target is generated using
@@ -768,14 +750,11 @@ func gentramp(ctxt *ld.Link, ldr *loader.Loader, tramp *loader.SymbolBuilder, ta
 		// With external linking, the target address must be
 		// relocated using LO and HA
 		if ctxt.IsExternal() {
-			r := loader.Reloc{
-				Off:  0,
-				Type: objabi.R_ADDRPOWER,
-				Size: 8, // generates 2 relocations:  HA + LO
-				Sym:  target,
-				Add:  offset,
-			}
-			tramp.AddReloc(r)
+			r, _ := tramp.AddRel(objabi.R_ADDRPOWER)
+			r.SetOff(0)
+			r.SetSiz(8) // generates 2 relocations: HA + LO
+			r.SetSym(target)
+			r.SetAdd(offset)
 		} else {
 			// adjustment needed if lo has sign bit set
 			// when using addi to compute address
@@ -797,7 +776,7 @@ func gentramp(ctxt *ld.Link, ldr *loader.Loader, tramp *loader.SymbolBuilder, ta
 	tramp.SetData(P)
 }
 
-func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc2, s loader.Sym, val int64) (relocatedOffset int64, nExtReloc int, ok bool) {
+func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc, s loader.Sym, val int64) (relocatedOffset int64, nExtReloc int, ok bool) {
 	rs := ldr.ResolveABIAlias(r.Sym())
 	if target.IsExternal() {
 		// On AIX, relocations (except TLS ones) must be also done to the
@@ -874,7 +853,7 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 	return val, nExtReloc, false
 }
 
-func archrelocvariant(target *ld.Target, ldr *loader.Loader, r loader.Reloc2, rv sym.RelocVariant, s loader.Sym, t int64) (relocatedOffset int64) {
+func archrelocvariant(target *ld.Target, ldr *loader.Loader, r loader.Reloc, rv sym.RelocVariant, s loader.Sym, t int64) (relocatedOffset int64) {
 	rs := ldr.ResolveABIAlias(r.Sym())
 	switch rv & sym.RV_TYPE_MASK {
 	default:
@@ -966,35 +945,19 @@ overflow:
 	return t
 }
 
-func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc2, s loader.Sym) (loader.ExtReloc, bool) {
-	rs := ldr.ResolveABIAlias(r.Sym())
-	var rr loader.ExtReloc
+func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc, s loader.Sym) (loader.ExtReloc, bool) {
 	switch r.Type() {
-	case objabi.R_POWER_TLS, objabi.R_POWER_TLS_LE, objabi.R_POWER_TLS_IE:
-		rr.Xadd = r.Add()
-		rr.Xsym = rs
-		return rr, true
+	case objabi.R_POWER_TLS, objabi.R_POWER_TLS_LE, objabi.R_POWER_TLS_IE, objabi.R_CALLPOWER:
+		return ld.ExtrelocSimple(ldr, r), true
 	case objabi.R_ADDRPOWER,
 		objabi.R_ADDRPOWER_DS,
 		objabi.R_ADDRPOWER_TOCREL,
 		objabi.R_ADDRPOWER_TOCREL_DS,
 		objabi.R_ADDRPOWER_GOT,
 		objabi.R_ADDRPOWER_PCREL:
-		// set up addend for eventual relocation via outer symbol.
-		rs, off := ld.FoldSubSymbolOffset(ldr, rs)
-		rr.Xadd = r.Add() + off
-		rst := ldr.SymType(rs)
-		if rst != sym.SHOSTOBJ && rst != sym.SDYNIMPORT && rst != sym.SUNDEFEXT && ldr.SymSect(rs) == nil {
-			ldr.Errorf(s, "missing section for %s", ldr.SymName(rs))
-		}
-		rr.Xsym = rs
-		return rr, true
-	case objabi.R_CALLPOWER:
-		rr.Xsym = rs
-		rr.Xadd = r.Add()
-		return rr, true
+		return ld.ExtrelocViaOuterSym(ldr, r, s), true
 	}
-	return rr, false
+	return loader.ExtReloc{}, false
 }
 
 func addpltsym(ctxt *ld.Link, ldr *loader.Loader, s loader.Sym) {
@@ -1016,13 +979,10 @@ func addpltsym(ctxt *ld.Link, ldr *loader.Loader, s loader.Sym) {
 
 		// Write symbol resolver stub (just a branch to the
 		// glink resolver stub)
-		rel := loader.Reloc{
-			Off:  int32(glink.Size()),
-			Size: 4,
-			Type: objabi.R_CALLPOWER,
-			Sym:  glink.Sym(),
-		}
-		glink.AddReloc(rel)
+		rel, _ := glink.AddRel(objabi.R_CALLPOWER)
+		rel.SetOff(int32(glink.Size()))
+		rel.SetSiz(4)
+		rel.SetSym(glink.Sym())
 		glink.AddUint32(ctxt.Arch, 0x48000000) // b .glink
 
 		// In the ppc64 ABI, the dynamic linker is responsible

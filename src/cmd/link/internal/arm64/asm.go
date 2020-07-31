@@ -56,27 +56,21 @@ func gentext(ctxt *ld.Link, ldr *loader.Loader) {
 	// 	4: R_AARCH64_ADD_ABS_LO12_NC	local.moduledata
 	o(0x90000000)
 	o(0x91000000)
-	rel := loader.Reloc{
-		Off:  0,
-		Size: 8,
-		Type: objabi.R_ADDRARM64,
-		Sym:  ctxt.Moduledata,
-	}
-	initfunc.AddReloc(rel)
+	rel, _ := initfunc.AddRel(objabi.R_ADDRARM64)
+	rel.SetOff(0)
+	rel.SetSiz(8)
+	rel.SetSym(ctxt.Moduledata)
 
 	// 8:	14000000 	b	0 <runtime.addmoduledata>
 	// 	8: R_AARCH64_CALL26	runtime.addmoduledata
 	o(0x14000000)
-	rel2 := loader.Reloc{
-		Off:  8,
-		Size: 4,
-		Type: objabi.R_CALLARM64, // Really should be R_AARCH64_JUMP26 but doesn't seem to make any difference
-		Sym:  addmoduledata,
-	}
-	initfunc.AddReloc(rel2)
+	rel2, _ := initfunc.AddRel(objabi.R_CALLARM64)
+	rel2.SetOff(8)
+	rel2.SetSiz(4)
+	rel2.SetSym(addmoduledata)
 }
 
-func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc2, rIdx int) bool {
+func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc, rIdx int) bool {
 
 	targ := r.Sym()
 	var targType sym.SymKind
@@ -211,7 +205,7 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 
 	// Reread the reloc to incorporate any changes in type above.
 	relocs := ldr.Relocs(s)
-	r = relocs.At2(rIdx)
+	r = relocs.At(rIdx)
 
 	switch r.Type() {
 	case objabi.R_CALL,
@@ -323,12 +317,12 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 	return false
 }
 
-func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, ri int, sectoff int64) bool {
 	out.Write64(uint64(sectoff))
 
 	elfsym := ld.ElfSymForReloc(ctxt, r.Xsym)
-	siz := r.Siz()
-	switch r.Type() {
+	siz := r.Size
+	switch r.Type {
 	default:
 		return false
 	case objabi.R_ADDR, objabi.R_DWARFSECREF:
@@ -370,12 +364,12 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 	return true
 }
 
-func machoreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func machoreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, sectoff int64) bool {
 	var v uint32
 
 	rs := r.Xsym
-	rt := r.Type()
-	siz := r.Siz()
+	rt := r.Type
+	siz := r.Size
 
 	if ldr.SymType(rs) == sym.SHOSTOBJ || rt == objabi.R_CALLARM64 || rt == objabi.R_ADDRARM64 {
 		if ldr.SymDynid(rs) < 0 {
@@ -441,7 +435,7 @@ func machoreloc1(arch *sys.Arch, out *ld.OutBuf, ldr *loader.Loader, s loader.Sy
 	return true
 }
 
-func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc2, s loader.Sym, val int64) (int64, int, bool) {
+func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc, s loader.Sym, val int64) (int64, int, bool) {
 	const noExtReloc = 0
 	const isOk = true
 
@@ -682,22 +676,16 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 	return val, 0, false
 }
 
-func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc2, sym.RelocVariant, loader.Sym, int64) int64 {
+func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc, sym.RelocVariant, loader.Sym, int64) int64 {
 	log.Fatalf("unexpected relocation variant")
 	return -1
 }
 
-func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc2, s loader.Sym) (loader.ExtReloc, bool) {
-	rs := ldr.ResolveABIAlias(r.Sym())
-	var rr loader.ExtReloc
+func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc, s loader.Sym) (loader.ExtReloc, bool) {
 	switch rt := r.Type(); rt {
 	case objabi.R_ARM64_GOTPCREL,
 		objabi.R_ADDRARM64:
-
-		// set up addend for eventual relocation via outer symbol.
-		rs, off := ld.FoldSubSymbolOffset(ldr, rs)
-		rr.Xadd = r.Add() + off
-		rr.Xsym = rs
+		rr := ld.ExtrelocViaOuterSym(ldr, r, s)
 
 		// Note: ld64 currently has a bug that any non-zero addend for BR26 relocation
 		// will make the linking fail because it thinks the code is not PIC even though
@@ -716,11 +704,9 @@ func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc2, s loader.S
 	case objabi.R_CALLARM64,
 		objabi.R_ARM64_TLS_LE,
 		objabi.R_ARM64_TLS_IE:
-		rr.Xsym = rs
-		rr.Xadd = r.Add()
-		return rr, true
+		return ld.ExtrelocSimple(ldr, r), true
 	}
-	return rr, false
+	return loader.ExtReloc{}, false
 }
 
 func elfsetupplt(ctxt *ld.Link, plt, gotplt *loader.SymbolBuilder, dynamic loader.Sym) {

@@ -1201,7 +1201,9 @@ func (f *xcoffFile) adddynimpsym(ctxt *Link, s loader.Sym) {
 
 	// Relocation to retrieve the external address
 	sb.AddBytes(make([]byte, 8))
-	sb.AddReloc(loader.Reloc{Off: 0, Size: uint8(ctxt.Arch.PtrSize), Type: objabi.R_ADDR, Sym: extsym.Sym()})
+	r, _ := sb.AddRel(objabi.R_ADDR)
+	r.SetSym(extsym.Sym())
+	r.SetSiz(uint8(ctxt.Arch.PtrSize))
 	// TODO: maybe this could be
 	// sb.SetSize(0)
 	// sb.SetData(nil)
@@ -1212,7 +1214,7 @@ func (f *xcoffFile) adddynimpsym(ctxt *Link, s loader.Sym) {
 
 // Xcoffadddynrel adds a dynamic relocation in a XCOFF file.
 // This relocation will be made by the loader.
-func Xcoffadddynrel(target *Target, ldr *loader.Loader, syms *ArchSyms, s loader.Sym, r loader.Reloc2, rIdx int) bool {
+func Xcoffadddynrel(target *Target, ldr *loader.Loader, syms *ArchSyms, s loader.Sym, r loader.Reloc, rIdx int) bool {
 	if target.IsExternal() {
 		return true
 	}
@@ -1703,12 +1705,12 @@ func (f *xcoffFile) emitRelocations(ctxt *Link, fileoff int64) {
 				sorted[i] = i
 			}
 			sort.Slice(sorted, func(i, j int) bool {
-				return relocs.At2(sorted[i]).Off() < relocs.At2(sorted[j]).Off()
+				return relocs.At(sorted[i]).Off() < relocs.At(sorted[j]).Off()
 			})
 
 			for _, ri := range sorted {
-				r := relocs.At2(ri)
-				rr, ok := extreloc(ctxt, ldr, s, r, ri)
+				r := relocs.At(ri)
+				rr, ok := extreloc(ctxt, ldr, s, r)
 				if !ok {
 					continue
 				}
@@ -1719,8 +1721,7 @@ func (f *xcoffFile) emitRelocations(ctxt *Link, fileoff int64) {
 				if ldr.SymDynid(rr.Xsym) < 0 {
 					ldr.Errorf(s, "reloc %s to non-coff symbol %s (outer=%s) %d %d", r.Type(), ldr.SymName(r.Sym()), ldr.SymName(rr.Xsym), ldr.SymType(r.Sym()), ldr.SymDynid(rr.Xsym))
 				}
-				rv := loader.ExtRelocView{Reloc2: r, ExtReloc: rr}
-				if !thearch.Xcoffreloc1(ctxt.Arch, ctxt.Out, ldr, s, rv, int64(uint64(ldr.SymValue(s)+int64(r.Off()))-base)) {
+				if !thearch.Xcoffreloc1(ctxt.Arch, ctxt.Out, ldr, s, rr, int64(uint64(ldr.SymValue(s)+int64(r.Off()))-base)) {
 					ldr.Errorf(s, "unsupported obj reloc %d(%s)/%d to %s", r.Type(), r.Type(), r.Siz(), ldr.SymName(r.Sym()))
 				}
 			}

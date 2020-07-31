@@ -43,15 +43,15 @@ func gentext(ctxt *ld.Link, ldr *loader.Loader) {
 	return
 }
 
-func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, ri int, sectoff int64) bool {
 	out.Write32(uint32(sectoff))
 
 	elfsym := ld.ElfSymForReloc(ctxt, r.Xsym)
-	switch r.Type() {
+	switch r.Type {
 	default:
 		return false
 	case objabi.R_ADDR, objabi.R_DWARFSECREF:
-		if r.Siz() != 4 {
+		if r.Size != 4 {
 			return false
 		}
 		out.Write32(uint32(elf.R_MIPS_32) | uint32(elfsym)<<8)
@@ -72,7 +72,7 @@ func elfsetupplt(ctxt *ld.Link, plt, gotplt *loader.SymbolBuilder, dynamic loade
 	return
 }
 
-func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtRelocView, int64) bool {
+func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtReloc, int64) bool {
 	return false
 }
 
@@ -90,7 +90,7 @@ func applyrel(arch *sys.Arch, ldr *loader.Loader, rt objabi.RelocType, off int32
 	}
 }
 
-func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc2, s loader.Sym, val int64) (o int64, nExtReloc int, ok bool) {
+func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc, s loader.Sym, val int64) (o int64, nExtReloc int, ok bool) {
 	rs := r.Sym()
 	rs = ldr.ResolveABIAlias(rs)
 	if target.IsExternal() {
@@ -140,29 +140,17 @@ func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loade
 	return val, 0, false
 }
 
-func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc2, sym.RelocVariant, loader.Sym, int64) int64 {
+func archrelocvariant(*ld.Target, *loader.Loader, loader.Reloc, sym.RelocVariant, loader.Sym, int64) int64 {
 	return -1
 }
 
-func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc2, s loader.Sym) (loader.ExtReloc, bool) {
-	rs := ldr.ResolveABIAlias(r.Sym())
-	var rr loader.ExtReloc
+func extreloc(target *ld.Target, ldr *loader.Loader, r loader.Reloc, s loader.Sym) (loader.ExtReloc, bool) {
 	switch r.Type() {
 	case objabi.R_ADDRMIPS, objabi.R_ADDRMIPSU:
-		// set up addend for eventual relocation via outer symbol.
-		rs, off := ld.FoldSubSymbolOffset(ldr, rs)
-		rr.Xadd = r.Add() + off
-		rst := ldr.SymType(rs)
-		if rst != sym.SHOSTOBJ && rst != sym.SDYNIMPORT && ldr.SymSect(rs) == nil {
-			ldr.Errorf(s, "missing section for %s", ldr.SymName(rs))
-		}
-		rr.Xsym = rs
-		return rr, true
+		return ld.ExtrelocViaOuterSym(ldr, r, s), true
 
 	case objabi.R_ADDRMIPSTLS, objabi.R_CALLMIPS, objabi.R_JMPMIPS:
-		rr.Xsym = rs
-		rr.Xadd = r.Add()
-		return rr, true
+		return ld.ExtrelocSimple(ldr, r), true
 	}
-	return rr, false
+	return loader.ExtReloc{}, false
 }

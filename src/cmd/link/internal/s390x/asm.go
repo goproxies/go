@@ -73,7 +73,7 @@ func gentext(ctxt *ld.Link, ldr *loader.Loader) {
 	initfunc.AddUint32(ctxt.Arch, 0)
 }
 
-func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc2, rIdx int) bool {
+func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loader.Sym, r loader.Reloc, rIdx int) bool {
 	targ := r.Sym()
 	var targType sym.SymKind
 	if targ != 0 {
@@ -219,12 +219,12 @@ func adddynrel(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, s loade
 	return false
 }
 
-func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtRelocView, sectoff int64) bool {
+func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, r loader.ExtReloc, ri int, sectoff int64) bool {
 	out.Write64(uint64(sectoff))
 
 	elfsym := ld.ElfSymForReloc(ctxt, r.Xsym)
-	siz := r.Siz()
-	switch r.Type() {
+	siz := r.Size
+	switch r.Type {
 	default:
 		return false
 	case objabi.R_TLS_LE:
@@ -262,15 +262,15 @@ func elfreloc1(ctxt *ld.Link, out *ld.OutBuf, ldr *loader.Loader, s loader.Sym, 
 		}
 	case objabi.R_PCREL, objabi.R_PCRELDBL, objabi.R_CALL:
 		elfrel := elf.R_390_NONE
-		rVariant := ldr.RelocVariant(s, r.Idx)
+		rVariant := ldr.RelocVariant(s, ri)
 		isdbl := rVariant&sym.RV_TYPE_MASK == sym.RV_390_DBL
 		// TODO(mundaym): all DBL style relocations should be
 		// signalled using the variant - see issue 14218.
-		switch r.Type() {
+		switch r.Type {
 		case objabi.R_PCRELDBL, objabi.R_CALL:
 			isdbl = true
 		}
-		if ldr.SymType(r.Xsym) == sym.SDYNIMPORT && (ldr.SymElfType(r.Xsym) == elf.STT_FUNC || r.Type() == objabi.R_CALL) {
+		if ldr.SymType(r.Xsym) == sym.SDYNIMPORT && (ldr.SymElfType(r.Xsym) == elf.STT_FUNC || r.Type == objabi.R_CALL) {
 			if isdbl {
 				switch siz {
 				case 2:
@@ -363,15 +363,15 @@ func elfsetupplt(ctxt *ld.Link, plt, got *loader.SymbolBuilder, dynamic loader.S
 	}
 }
 
-func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtRelocView, int64) bool {
+func machoreloc1(*sys.Arch, *ld.OutBuf, *loader.Loader, loader.Sym, loader.ExtReloc, int64) bool {
 	return false
 }
 
-func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc2, s loader.Sym, val int64) (o int64, nExtReloc int, ok bool) {
+func archreloc(target *ld.Target, ldr *loader.Loader, syms *ld.ArchSyms, r loader.Reloc, s loader.Sym, val int64) (o int64, nExtReloc int, ok bool) {
 	return val, 0, false
 }
 
-func archrelocvariant(target *ld.Target, ldr *loader.Loader, r loader.Reloc2, rv sym.RelocVariant, s loader.Sym, t int64) int64 {
+func archrelocvariant(target *ld.Target, ldr *loader.Loader, r loader.Reloc, rv sym.RelocVariant, s loader.Sym, t int64) int64 {
 	switch rv & sym.RV_TYPE_MASK {
 	default:
 		ldr.Errorf(s, "unexpected relocation variant %d", rv)
