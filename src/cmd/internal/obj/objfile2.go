@@ -105,6 +105,10 @@ func WriteObjFile(ctxt *Link, b *bio.Writer) {
 		w.Sym(s)
 	}
 
+	// Referenced package symbol flags
+	h.Offsets[goobj2.BlkRefFlags] = w.Offset()
+	w.refFlags()
+
 	// Hashes
 	h.Offsets[goobj2.BlkHash64] = w.Offset()
 	for _, s := range ctxt.hashed64defs {
@@ -296,6 +300,9 @@ func (w *writer) Sym(s *LSym) {
 	if s.UsedInIface() {
 		flag2 |= goobj2.SymFlagUsedInIface
 	}
+	if strings.HasPrefix(s.Name, "go.itab.") && s.Type == objabi.SRODATA {
+		flag2 |= goobj2.SymFlagItab
+	}
 	name := s.Name
 	if strings.HasPrefix(name, "gofile..") {
 		name = filepath.ToSlash(name)
@@ -363,7 +370,8 @@ func contentHash64(s *LSym) goobj2.Hash64Type {
 // consistent.
 // - For referenced content-addressable symbol, its content hash
 //   is globally consistent.
-// - For package symbol, its local index is globally consistent.
+// - For package symbol and builtin symbol, its local index is
+//   globally consistent.
 // - For non-package symbol, its fully-expanded name is globally
 //   consistent. For now, we require we know the current package
 //   path so we can always expand symbol names. (Otherwise,
@@ -394,11 +402,13 @@ func (w *writer) contentHash(s *LSym) goobj2.HashType {
 			h.Write([]byte{1})
 			t := w.contentHash(rs)
 			h.Write(t[:])
-		case goobj2.PkgIdxBuiltin:
-			panic("unsupported")
 		case goobj2.PkgIdxNone:
 			h.Write([]byte{2})
 			io.WriteString(h, rs.Name) // name is already expanded at this point
+		case goobj2.PkgIdxBuiltin:
+			h.Write([]byte{3})
+			binary.LittleEndian.PutUint32(tmp[:4], uint32(rs.SymIdx))
+			h.Write(tmp[:4])
 		case goobj2.PkgIdxSelf:
 			io.WriteString(h, w.pkgpath)
 			binary.LittleEndian.PutUint32(tmp[:4], uint32(rs.SymIdx))
@@ -468,10 +478,9 @@ func (w *writer) Aux(s *LSym) {
 	}
 }
 
-// Emits names of referenced indexed symbols, used by tools (objdump, nm)
-// only.
-func (w *writer) refNames() {
-	seen := make(map[goobj2.SymRef]bool)
+// Emits flags of referenced indexed symbols.
+func (w *writer) refFlags() {
+	seen := make(map[*LSym]bool)
 	w.ctxt.traverseSyms(traverseRefs, func(rs *LSym) { // only traverse refs, not auxs, as tools don't need auxs
 		switch rs.PkgIdx {
 		case goobj2.PkgIdxNone, goobj2.PkgIdxHashed64, goobj2.PkgIdxHashed, goobj2.PkgIdxBuiltin, goobj2.PkgIdxSelf: // not an external indexed reference
@@ -479,11 +488,41 @@ func (w *writer) refNames() {
 		case goobj2.PkgIdxInvalid:
 			panic("unindexed symbol reference")
 		}
-		symref := makeSymRef(rs)
-		if seen[symref] {
+		if seen[rs] {
 			return
 		}
-		seen[symref] = true
+		seen[rs] = true
+		symref := makeSymRef(rs)
+		flag2 := uint8(0)
+		if rs.UsedInIface() {
+			flag2 |= goobj2.SymFlagUsedInIface
+		}
+		if flag2 == 0 {
+			return // no need to write zero flags
+		}
+		var o goobj2.RefFlags
+		o.SetSym(symref)
+		o.SetFlag2(flag2)
+		o.Write(w.Writer)
+	})
+}
+
+// Emits names of referenced indexed symbols, used by tools (objdump, nm)
+// only.
+func (w *writer) refNames() {
+	seen := make(map[*LSym]bool)
+	w.ctxt.traverseSyms(traverseRefs, func(rs *LSym) { // only traverse refs, not auxs, as tools don't need auxs
+		switch rs.PkgIdx {
+		case goobj2.PkgIdxNone, goobj2.PkgIdxHashed64, goobj2.PkgIdxHashed, goobj2.PkgIdxBuiltin, goobj2.PkgIdxSelf: // not an external indexed reference
+			return
+		case goobj2.PkgIdxInvalid:
+			panic("unindexed symbol reference")
+		}
+		if seen[rs] {
+			return
+		}
+		seen[rs] = true
+		symref := makeSymRef(rs)
 		var o goobj2.RefName
 		o.SetSym(symref)
 		o.SetName(rs.Name, w.Writer)
@@ -534,6 +573,7 @@ func genFuncInfoSyms(ctxt *Link) {
 		o := goobj2.FuncInfo{
 			Args:   uint32(s.Func.Args),
 			Locals: uint32(s.Func.Locals),
+			FuncID: objabi.FuncID(s.Func.FuncID),
 		}
 		pc := &s.Func.Pcln
 		o.Pcsp = pcdataoff

@@ -605,9 +605,8 @@ func xcoffUpdateOuterSize(ctxt *Link, size int64, stype sym.SymKind) {
 		outerSymSize["go.funcrel.*"] = size
 	case sym.SGCBITS:
 		outerSymSize["runtime.gcbits.*"] = size
-	case sym.SITABLINK:
-		outerSymSize["runtime.itablink"] = size
-
+	case sym.SPCLNTAB:
+		outerSymSize["runtime.pclntab"] = size
 	}
 }
 

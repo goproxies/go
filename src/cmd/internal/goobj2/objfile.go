@@ -21,7 +21,7 @@ import (
 // New object file format.
 //
 //    Header struct {
-//       Magic       [...]byte   // "\x00go115ld"
+//       Magic       [...]byte   // "\x00go116ld"
 //       Fingerprint [8]byte
 //       Flags       uint32
 //       Offsets     [...]uint32 // byte offset of each block below
@@ -41,11 +41,12 @@ import (
 //    DwarfFiles [...]string
 //
 //    SymbolDefs [...]struct {
-//       Name string
-//       ABI  uint16
-//       Type uint8
-//       Flag uint8
-//       Size uint32
+//       Name  string
+//       ABI   uint16
+//       Type  uint8
+//       Flag  uint8
+//       Flag2 uint8
+//       Size  uint32
 //    }
 //    Hashed64Defs [...]struct { // short hashed (content-addressable) symbol definitions
 //       ... // same as SymbolDefs
@@ -58,6 +59,12 @@ import (
 //    }
 //    NonPkgRefs [...]struct { // non-pkg symbol references
 //       ... // same as SymbolDefs
+//    }
+//
+//    RefFlags [...]struct { // referenced symbol flags
+//       Sym   symRef
+//       Flag  uint8
+//       Flag2 uint8
 //    }
 //
 //    Hash64 [...][8]byte
@@ -176,6 +183,7 @@ const (
 	BlkHasheddef
 	BlkNonpkgdef
 	BlkNonpkgref
+	BlkRefFlags
 	BlkHash64
 	BlkHash
 	BlkRelocIdx
@@ -199,7 +207,7 @@ type Header struct {
 	Offsets     [NBlk]uint32
 }
 
-const Magic = "\x00go115ld"
+const Magic = "\x00go116ld"
 
 func (h *Header) Write(w *Writer) {
 	w.RawString(h.Magic)
@@ -284,6 +292,7 @@ const (
 // Sym.Flag2
 const (
 	SymFlagUsedInIface = 1 << iota
+	SymFlagItab
 )
 
 // Returns the length of the name of the symbol.
@@ -313,6 +322,7 @@ func (s *Sym) ReflectMethod() bool { return s.Flag()&SymFlagReflectMethod != 0 }
 func (s *Sym) IsGoType() bool      { return s.Flag()&SymFlagGoType != 0 }
 func (s *Sym) TopFrame() bool      { return s.Flag()&SymFlagTopFrame != 0 }
 func (s *Sym) UsedInIface() bool   { return s.Flag2()&SymFlagUsedInIface != 0 }
+func (s *Sym) IsItab() bool        { return s.Flag2()&SymFlagItab != 0 }
 
 func (s *Sym) SetName(x string, w *Writer) {
 	binary.LittleEndian.PutUint32(s[:], uint32(len(x)))
@@ -430,6 +440,33 @@ func (a *Aux) Write(w *Writer) { w.Bytes(a[:]) }
 
 // for testing
 func (a *Aux) fromBytes(b []byte) { copy(a[:], b) }
+
+// Referenced symbol flags.
+//
+// Serialized format:
+// RefFlags struct {
+//    Sym   symRef
+//    Flag  uint8
+//    Flag2 uint8
+// }
+type RefFlags [RefFlagsSize]byte
+
+const RefFlagsSize = 8 + 1 + 1
+
+func (r *RefFlags) Sym() SymRef {
+	return SymRef{binary.LittleEndian.Uint32(r[:]), binary.LittleEndian.Uint32(r[4:])}
+}
+func (r *RefFlags) Flag() uint8  { return r[8] }
+func (r *RefFlags) Flag2() uint8 { return r[9] }
+
+func (r *RefFlags) SetSym(x SymRef) {
+	binary.LittleEndian.PutUint32(r[:], x.PkgIdx)
+	binary.LittleEndian.PutUint32(r[4:], x.SymIdx)
+}
+func (r *RefFlags) SetFlag(x uint8)  { r[8] = x }
+func (r *RefFlags) SetFlag2(x uint8) { r[9] = x }
+
+func (r *RefFlags) Write(w *Writer) { w.Bytes(r[:]) }
 
 // Referenced symbol name.
 //
@@ -687,6 +724,18 @@ func (r *Reader) SymOff(i uint32) uint32 {
 func (r *Reader) Sym(i uint32) *Sym {
 	off := r.SymOff(i)
 	return (*Sym)(unsafe.Pointer(&r.b[off]))
+}
+
+// NRefFlags returns the number of referenced symbol flags.
+func (r *Reader) NRefFlags() int {
+	return int(r.h.Offsets[BlkRefFlags+1]-r.h.Offsets[BlkRefFlags]) / RefFlagsSize
+}
+
+// RefFlags returns a pointer to the i-th referenced symbol flags.
+// Note: here i is not a local symbol index, just a counter.
+func (r *Reader) RefFlags(i int) *RefFlags {
+	off := r.h.Offsets[BlkRefFlags] + uint32(i*RefFlagsSize)
+	return (*RefFlags)(unsafe.Pointer(&r.b[off]))
 }
 
 // Hash64 returns the i-th short hashed symbol's hash.

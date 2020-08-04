@@ -204,10 +204,8 @@ type Loader struct {
 
 	objSyms []objSym // global index mapping to local index
 
-	hashed64Syms  map[uint64]symAndSize          // short hashed (content-addressable) symbols, keyed by content hash
-	hashedSyms    map[goobj2.HashType]symAndSize // hashed (content-addressable) symbols, keyed by content hash
-	symsByName    [2]map[string]Sym              // map symbol name to index, two maps are for ABI0 and ABIInternal
-	extStaticSyms map[nameVer]Sym                // externally defined static symbols, keyed by name
+	symsByName    [2]map[string]Sym // map symbol name to index, two maps are for ABI0 and ABIInternal
+	extStaticSyms map[nameVer]Sym   // externally defined static symbols, keyed by name
 
 	extReader    *oReader // a dummy oReader, for external symbols
 	payloadBatch []extSymPayload
@@ -219,8 +217,7 @@ type Loader struct {
 
 	align []uint8 // symbol 2^N alignment, indexed by global index
 
-	itablink         map[Sym]struct{} // itablink[j] defined if j is go.itablink.*
-	deferReturnTramp map[Sym]bool     // whether the symbol is a trampoline of a deferreturn call
+	deferReturnTramp map[Sym]bool // whether the symbol is a trampoline of a deferreturn call
 
 	objByPkg map[string]*oReader // map package path to its Go object reader
 
@@ -277,13 +274,16 @@ type Loader struct {
 
 	flags uint32
 
+	hasUnknownPkgPath bool // if any Go object has unknown package path
+
 	strictDupMsgs int // number of strict-dup warning/errors, when FlagStrictDups is enabled
 
 	elfsetstring elfsetstringFunc
 
 	errorReporter *ErrorReporter
 
-	npkgsyms int // number of package symbols, for accounting
+	npkgsyms    int // number of package symbols, for accounting
+	nhashedsyms int // number of hashed symbols, for accounting
 }
 
 const (
@@ -330,8 +330,6 @@ func NewLoader(flags uint32, elfsetstring elfsetstringFunc, reporter *ErrorRepor
 		objs:                 []objIdx{{}, {extReader, 0}}, // reserve index 0 for nil symbol, 1 for external symbols
 		objSyms:              make([]objSym, 1, 100000),    // reserve index 0 for nil symbol
 		extReader:            extReader,
-		hashed64Syms:         make(map[uint64]symAndSize, 10000),                                          // TODO: adjust preallocation sizes
-		hashedSyms:           make(map[goobj2.HashType]symAndSize, 20000),                                 // TODO: adjust preallocation sizes
 		symsByName:           [2]map[string]Sym{make(map[string]Sym, 80000), make(map[string]Sym, 50000)}, // preallocate ~2MB for ABI0 and ~1MB for ABI1 symbols
 		objByPkg:             make(map[string]*oReader),
 		outer:                make(map[Sym]Sym),
@@ -353,7 +351,6 @@ func NewLoader(flags uint32, elfsetstring elfsetstringFunc, reporter *ErrorRepor
 		attrCgoExportDynamic: make(map[Sym]struct{}),
 		attrCgoExportStatic:  make(map[Sym]struct{}),
 		generatedSyms:        make(map[Sym]struct{}),
-		itablink:             make(map[Sym]struct{}),
 		deferReturnTramp:     make(map[Sym]bool),
 		extStaticSyms:        make(map[nameVer]Sym),
 		builtinSyms:          make([]Sym, nbuiltin),
@@ -378,12 +375,16 @@ func (l *Loader) addObj(pkg string, r *oReader) Sym {
 	i := Sym(len(l.objSyms))
 	l.start[r] = i
 	l.objs = append(l.objs, objIdx{r, i})
+	if r.NeedNameExpansion() && !r.FromAssembly() {
+		l.hasUnknownPkgPath = true
+	}
 	return i
 }
 
 // Add a symbol from an object file, return the global index.
 // If the symbol already exist, it returns the index of that symbol.
-func (l *Loader) addSym(name string, ver int, r *oReader, li uint32, kind int, osym *goobj2.Sym) Sym {
+func (st *loadState) addSym(name string, ver int, r *oReader, li uint32, kind int, osym *goobj2.Sym) Sym {
+	l := st.l
 	if l.extStart != 0 {
 		panic("addSym called after external symbol is created")
 	}
@@ -424,17 +425,17 @@ func (l *Loader) addSym(name string, ver int, r *oReader, li uint32, kind int, o
 		if kind == hashed64Def {
 			checkHash = func() (symAndSize, bool) {
 				h64 = r.Hash64(li - uint32(r.ndef))
-				s, existed := l.hashed64Syms[h64]
+				s, existed := st.hashed64Syms[h64]
 				return s, existed
 			}
-			addToHashMap = func(ss symAndSize) { l.hashed64Syms[h64] = ss }
+			addToHashMap = func(ss symAndSize) { st.hashed64Syms[h64] = ss }
 		} else {
 			checkHash = func() (symAndSize, bool) {
 				h = r.Hash(li - uint32(r.ndef+r.nhashed64def))
-				s, existed := l.hashedSyms[*h]
+				s, existed := st.hashedSyms[*h]
 				return s, existed
 			}
-			addToHashMap = func(ss symAndSize) { l.hashedSyms[*h] = ss }
+			addToHashMap = func(ss symAndSize) { st.hashedSyms[*h] = ss }
 		}
 		siz := osym.Siz()
 		if s, existed := checkHash(); existed {
@@ -1160,12 +1161,13 @@ func (l *Loader) IsTypelink(i Sym) bool {
 	return l.SymAttr(i)&goobj2.SymFlagTypelink != 0
 }
 
-// Returns whether this is a "go.itablink.*" symbol.
-func (l *Loader) IsItabLink(i Sym) bool {
-	if _, ok := l.itablink[i]; ok {
-		return true
+// Returns whether this symbol is an itab symbol.
+func (l *Loader) IsItab(i Sym) bool {
+	if l.IsExternal(i) {
+		return false
 	}
-	return false
+	r, li := l.toLocal(i)
+	return r.Sym(li).IsItab()
 }
 
 // Return whether this is a trampoline of a deferreturn call.
@@ -1872,6 +1874,10 @@ func (fi *FuncInfo) Locals() int {
 	return int((*goobj2.FuncInfo)(nil).ReadLocals(fi.data))
 }
 
+func (fi *FuncInfo) FuncID() objabi.FuncID {
+	return objabi.FuncID((*goobj2.FuncInfo)(nil).ReadFuncID(fi.data))
+}
+
 func (fi *FuncInfo) Pcsp() []byte {
 	pcsp, end := (*goobj2.FuncInfo)(nil).ReadPcsp(fi.data)
 	return fi.r.BytesAt(fi.r.PcdataBase()+pcsp, int(end-pcsp))
@@ -2061,7 +2067,8 @@ func (l *Loader) Preload(localSymVersion int, f *bio.Reader, lib *sym.Library, u
 	}
 
 	l.addObj(lib.Pkg, or)
-	l.preloadSyms(or, pkgDef)
+	st := loadState{l: l}
+	st.preloadSyms(or, pkgDef)
 
 	// The caller expects us consuming all the data
 	f.MustSeek(length, os.SEEK_CUR)
@@ -2069,8 +2076,16 @@ func (l *Loader) Preload(localSymVersion int, f *bio.Reader, lib *sym.Library, u
 	return r.Fingerprint()
 }
 
+// Holds the loader along with temporary states for loading symbols.
+type loadState struct {
+	l            *Loader
+	hashed64Syms map[uint64]symAndSize          // short hashed (content-addressable) symbols, keyed by content hash
+	hashedSyms   map[goobj2.HashType]symAndSize // hashed (content-addressable) symbols, keyed by content hash
+}
+
 // Preload symbols of given kind from an object.
-func (l *Loader) preloadSyms(r *oReader, kind int) {
+func (st *loadState) preloadSyms(r *oReader, kind int) {
+	l := st.l
 	var start, end uint32
 	switch kind {
 	case pkgDef:
@@ -2082,6 +2097,16 @@ func (l *Loader) preloadSyms(r *oReader, kind int) {
 	case hashedDef:
 		start = uint32(r.ndef + r.nhashed64def)
 		end = uint32(r.ndef + r.nhashed64def + r.nhasheddef)
+		if l.hasUnknownPkgPath {
+			// The content hash depends on symbol name expansion. If any package is
+			// built without fully expanded names, the content hash is unreliable.
+			// Treat them as named symbols.
+			// This is rare.
+			// (We don't need to do this for hashed64Def case, as there the hash
+			// function is simply the identity function, which doesn't depend on
+			// name expansion.)
+			kind = nonPkgDef
+		}
 	case nonPkgDef:
 		start = uint32(r.ndef + r.nhashed64def + r.nhasheddef)
 		end = uint32(r.ndef + r.nhashed64def + r.nhasheddef + r.NNonpkgdef())
@@ -2102,7 +2127,7 @@ func (l *Loader) preloadSyms(r *oReader, kind int) {
 			}
 			v = abiToVer(osym.ABI(), r.version)
 		}
-		gi := l.addSym(name, v, r, i, kind, osym)
+		gi := st.addSym(name, v, r, i, kind, osym)
 		r.syms[i] = gi
 		if osym.TopFrame() {
 			l.SetAttrTopFrame(gi, true)
@@ -2112,9 +2137,6 @@ func (l *Loader) preloadSyms(r *oReader, kind int) {
 		}
 		if osym.UsedInIface() {
 			l.SetAttrUsedInIface(gi, true)
-		}
-		if strings.HasPrefix(name, "go.itablink.") {
-			l.itablink[gi] = struct{}{}
 		}
 		if strings.HasPrefix(name, "runtime.") ||
 			(loadingRuntimePkg && strings.HasPrefix(name, "type.")) {
@@ -2133,11 +2155,20 @@ func (l *Loader) preloadSyms(r *oReader, kind int) {
 // references to external symbols (which are always named).
 func (l *Loader) LoadNonpkgSyms(arch *sys.Arch) {
 	l.npkgsyms = l.NSym()
-	for _, o := range l.objs[goObjStart:] {
-		l.preloadSyms(o.r, hashed64Def)
-		l.preloadSyms(o.r, hashedDef)
-		l.preloadSyms(o.r, nonPkgDef)
+	// Preallocate some space (a few hundreds KB) for some symbols.
+	// As of Go 1.15, linking cmd/compile has ~8000 hashed64 symbols and
+	// ~13000 hashed symbols.
+	st := loadState{
+		l:            l,
+		hashed64Syms: make(map[uint64]symAndSize, 10000),
+		hashedSyms:   make(map[goobj2.HashType]symAndSize, 15000),
 	}
+	for _, o := range l.objs[goObjStart:] {
+		st.preloadSyms(o.r, hashed64Def)
+		st.preloadSyms(o.r, hashedDef)
+		st.preloadSyms(o.r, nonPkgDef)
+	}
+	l.nhashedsyms = len(st.hashed64Syms) + len(st.hashedSyms)
 	for _, o := range l.objs[goObjStart:] {
 		loadObjRefs(l, o.r, arch)
 	}
@@ -2145,6 +2176,7 @@ func (l *Loader) LoadNonpkgSyms(arch *sys.Arch) {
 }
 
 func loadObjRefs(l *Loader, r *oReader, arch *sys.Arch) {
+	// load non-package refs
 	ndef := uint32(r.NAlldef())
 	needNameExpansion := r.NeedNameExpansion()
 	for i, n := uint32(0), uint32(r.NNonpkgref()); i < n; i++ {
@@ -2160,6 +2192,15 @@ func loadObjRefs(l *Loader, r *oReader, arch *sys.Arch) {
 			l.SetAttrLocal(gi, true)
 		}
 		if osym.UsedInIface() {
+			l.SetAttrUsedInIface(gi, true)
+		}
+	}
+
+	// load flags of package refs
+	for i, n := 0, r.NRefFlags(); i < n; i++ {
+		rf := r.RefFlags(i)
+		gi := l.resolve(r, rf.Sym())
+		if rf.Flag2()&goobj2.SymFlagUsedInIface != 0 {
 			l.SetAttrUsedInIface(gi, true)
 		}
 	}
@@ -2546,7 +2587,7 @@ func (l *Loader) Errorf(s Sym, format string, args ...interface{}) {
 func (l *Loader) Stat() string {
 	s := fmt.Sprintf("%d symbols, %d reachable\n", l.NSym(), l.NReachableSym())
 	s += fmt.Sprintf("\t%d package symbols, %d hashed symbols, %d non-package symbols, %d external symbols\n",
-		l.npkgsyms, len(l.hashed64Syms)+len(l.hashedSyms), int(l.extStart)-l.npkgsyms-len(l.hashed64Syms)-len(l.hashedSyms), l.NSym()-int(l.extStart))
+		l.npkgsyms, l.nhashedsyms, int(l.extStart)-l.npkgsyms-l.nhashedsyms, l.NSym()-int(l.extStart))
 	return s
 }
 
