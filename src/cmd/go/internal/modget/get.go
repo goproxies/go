@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -21,7 +22,6 @@ import (
 	"cmd/go/internal/load"
 	"cmd/go/internal/modload"
 	"cmd/go/internal/mvs"
-	"cmd/go/internal/par"
 	"cmd/go/internal/search"
 	"cmd/go/internal/work"
 
@@ -278,7 +278,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 	}
 	modload.LoadTests = *getT
 
-	buildList := modload.LoadBuildList()
+	buildList := modload.LoadBuildList(ctx)
 	buildList = buildList[:len(buildList):len(buildList)] // copy on append
 	versionByPath := make(map[string]string)
 	for _, m := range buildList {
@@ -353,7 +353,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 			if !strings.Contains(path, "...") {
 				m := search.NewMatch(path)
 				if pkgPath := modload.DirImportPath(path); pkgPath != "." {
-					m = modload.TargetPackages(pkgPath)
+					m = modload.TargetPackages(ctx, pkgPath)
 				}
 				if len(m.Pkgs) == 0 {
 					for _, err := range m.Errs {
@@ -399,7 +399,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 		default:
 			// The argument is a package or module path.
 			if modload.HasModRoot() {
-				if m := modload.TargetPackages(path); len(m.Pkgs) != 0 {
+				if m := modload.TargetPackages(ctx, path); len(m.Pkgs) != 0 {
 					// The path is in the main module. Nothing to query.
 					if vers != "upgrade" && vers != "patch" {
 						base.Errorf("go get %s: can't request explicit version of path in main module", arg)
@@ -444,7 +444,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 	// packages in unknown modules can't be expanded. This also avoids looking
 	// up new modules while loading packages, only to downgrade later.
 	queryCache := make(map[querySpec]*query)
-	byPath := runQueries(queryCache, queries, nil)
+	byPath := runQueries(ctx, queryCache, queries, nil)
 
 	// Add missing modules to the build list.
 	// We call SetBuildList here and elsewhere, since newUpgrader,
@@ -491,7 +491,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 		if q.path == q.m.Path {
 			wg.Add(1)
 			go func(q *query) {
-				if hasPkg, err := modload.ModuleHasRootPackage(q.m); err != nil {
+				if hasPkg, err := modload.ModuleHasRootPackage(ctx, q.m); err != nil {
 					base.Errorf("go get: %v", err)
 				} else if !hasPkg {
 					modOnlyMu.Lock()
@@ -536,7 +536,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 			// Don't load packages if pkgPatterns is empty. Both
 			// modload.ImportPathsQuiet and ModulePackages convert an empty list
 			// of patterns to []string{"."}, which is not what we want.
-			matches = modload.ImportPathsQuiet(pkgPatterns, imports.AnyTags())
+			matches = modload.ImportPathsQuiet(ctx, pkgPatterns, imports.AnyTags())
 			seenPkgs = make(map[string]bool)
 			for i, match := range matches {
 				arg := pkgGets[i]
@@ -586,7 +586,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 
 		// Query target versions for modules providing packages matched by
 		// command line arguments.
-		byPath = runQueries(queryCache, queries, modOnly)
+		byPath = runQueries(ctx, queryCache, queries, modOnly)
 
 		// Handle upgrades. This is needed for arguments that didn't match
 		// modules or matched different modules from a previous iteration. It
@@ -724,30 +724,45 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 // versions (including earlier queries in the modOnly map), an error will be
 // reported. A map from module paths to queries is returned, which includes
 // queries and modOnly.
-func runQueries(cache map[querySpec]*query, queries []*query, modOnly map[string]*query) map[string]*query {
-	var lookup par.Work
-	for _, q := range queries {
-		if cached := cache[q.querySpec]; cached != nil {
-			*q = *cached
-		} else {
-			cache[q.querySpec] = q
-			lookup.Add(q)
-		}
-	}
+func runQueries(ctx context.Context, cache map[querySpec]*query, queries []*query, modOnly map[string]*query) map[string]*query {
 
-	lookup.Do(10, func(item interface{}) {
-		q := item.(*query)
+	runQuery := func(q *query) {
 		if q.vers == "none" {
 			// Wait for downgrade step.
 			q.m = module.Version{Path: q.path, Version: "none"}
 			return
 		}
-		m, err := getQuery(q.path, q.vers, q.prevM, q.forceModulePath)
+		m, err := getQuery(ctx, q.path, q.vers, q.prevM, q.forceModulePath)
 		if err != nil {
 			base.Errorf("go get %s: %v", q.arg, err)
 		}
 		q.m = m
-	})
+	}
+
+	type token struct{}
+	sem := make(chan token, runtime.GOMAXPROCS(0))
+	for _, q := range queries {
+		if cached := cache[q.querySpec]; cached != nil {
+			*q = *cached
+		} else {
+			sem <- token{}
+			go func(q *query) {
+				runQuery(q)
+				<-sem
+			}(q)
+		}
+	}
+
+	// Fill semaphore channel to wait for goroutines to finish.
+	for n := cap(sem); n > 0; n-- {
+		sem <- token{}
+	}
+
+	// Add to cache after concurrent section to avoid races...
+	for _, q := range queries {
+		cache[q.querySpec] = q
+	}
+
 	base.ExitIfErrors()
 
 	byPath := make(map[string]*query)
@@ -775,7 +790,7 @@ func runQueries(cache map[querySpec]*query, queries []*query, modOnly map[string
 // to determine the underlying module version being requested.
 // If forceModulePath is set, getQuery must interpret path
 // as a module path.
-func getQuery(path, vers string, prevM module.Version, forceModulePath bool) (module.Version, error) {
+func getQuery(ctx context.Context, path, vers string, prevM module.Version, forceModulePath bool) (module.Version, error) {
 	if (prevM.Version != "") != forceModulePath {
 		// We resolve package patterns by calling QueryPattern, which does not
 		// accept a previous version and therefore cannot take it into account for
@@ -797,7 +812,7 @@ func getQuery(path, vers string, prevM module.Version, forceModulePath bool) (mo
 			}
 		}
 
-		info, err := modload.Query(path, vers, prevM.Version, modload.Allowed)
+		info, err := modload.Query(ctx, path, vers, prevM.Version, modload.Allowed)
 		if err == nil {
 			if info.Version != vers && info.Version != prevM.Version {
 				logOncef("go: %s %s => %s", path, vers, info.Version)
@@ -823,7 +838,7 @@ func getQuery(path, vers string, prevM module.Version, forceModulePath bool) (mo
 	// If it turns out to only exist as a module, we can detect the resulting
 	// PackageNotInModuleError and avoid a second round-trip through (potentially)
 	// all of the configured proxies.
-	results, err := modload.QueryPattern(path, vers, modload.Allowed)
+	results, err := modload.QueryPattern(ctx, path, vers, modload.Allowed)
 	if err != nil {
 		// If the path doesn't contain a wildcard, check whether it was actually a
 		// module path instead. If so, return that.
@@ -979,7 +994,7 @@ func (u *upgrader) Upgrade(m module.Version) (module.Version, error) {
 	// If we're querying "upgrade" or "patch", Query will compare the current
 	// version against the chosen version and will return the current version
 	// if it is newer.
-	info, err := modload.Query(m.Path, string(getU), m.Version, modload.Allowed)
+	info, err := modload.Query(context.TODO(), m.Path, string(getU), m.Version, modload.Allowed)
 	if err != nil {
 		// Report error but return m, to let version selection continue.
 		// (Reporting the error will fail the command at the next base.ExitIfErrors.)
