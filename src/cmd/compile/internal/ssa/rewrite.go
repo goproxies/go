@@ -618,6 +618,9 @@ func auxIntToFloat64(i int64) float64 {
 func auxIntToValAndOff(i int64) ValAndOff {
 	return ValAndOff(i)
 }
+func auxIntToArm64BitField(i int64) arm64BitField {
+	return arm64BitField(i)
+}
 func auxIntToInt128(x int64) int128 {
 	if x != 0 {
 		panic("nonzero int128 not allowed")
@@ -656,6 +659,9 @@ func float64ToAuxInt(f float64) int64 {
 	return int64(math.Float64bits(f))
 }
 func valAndOffToAuxInt(v ValAndOff) int64 {
+	return int64(v)
+}
+func arm64BitFieldToAuxInt(v arm64BitField) int64 {
 	return int64(v)
 }
 func int128ToAuxInt(x int128) int64 {
@@ -703,6 +709,10 @@ func s390xRotateParamsToAux(r s390x.RotateParams) interface{} {
 }
 func cCopToAux(o Op) interface{} {
 	return o
+}
+
+func auxToCCop(cc interface{}) Op {
+	return cc.(Op)
 }
 
 // uaddOvf reports whether unsigned a+b would overflow.
@@ -1008,8 +1018,7 @@ func arm64Invert(op Op) Op {
 // evaluate an ARM64 op against a flags value
 // that is potentially constant; return 1 for true,
 // -1 for false, and 0 for not constant.
-func ccARM64Eval(cc interface{}, flags *Value) int {
-	op := cc.(Op)
+func ccARM64Eval(op Op, flags *Value) int {
 	fop := flags.Op
 	if fop == OpARM64InvertFlags {
 		return -ccARM64Eval(op, flags.Args[0])
@@ -1292,24 +1301,24 @@ func hasSmallRotate(c *Config) bool {
 }
 
 // encodes the lsb and width for arm(64) bitfield ops into the expected auxInt format.
-func armBFAuxInt(lsb, width int64) int64 {
+func armBFAuxInt(lsb, width int64) arm64BitField {
 	if lsb < 0 || lsb > 63 {
 		panic("ARM(64) bit field lsb constant out of range")
 	}
 	if width < 1 || width > 64 {
 		panic("ARM(64) bit field width constant out of range")
 	}
-	return width | lsb<<8
+	return arm64BitField(width | lsb<<8)
 }
 
 // returns the lsb part of the auxInt field of arm64 bitfield ops.
-func getARM64BFlsb(bfc int64) int64 {
+func (bfc arm64BitField) getARM64BFlsb() int64 {
 	return int64(uint64(bfc) >> 8)
 }
 
 // returns the width part of the auxInt field of arm64 bitfield ops.
-func getARM64BFwidth(bfc int64) int64 {
-	return bfc & 0xff
+func (bfc arm64BitField) getARM64BFwidth() int64 {
+	return int64(bfc) & 0xff
 }
 
 // checks if mask >> rshift applied at lsb is a valid arm64 bitfield op mask.

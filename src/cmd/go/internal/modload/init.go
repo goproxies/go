@@ -383,8 +383,8 @@ func InitMod(ctx context.Context) {
 		legacyModInit()
 	}
 
-	modFileToBuildList()
 	setDefaultBuildMod()
+	modFileToBuildList()
 	if cfg.BuildMod == "vendor" {
 		readVendorList()
 		checkVendorConsistency()
@@ -459,7 +459,15 @@ func modFileToBuildList() {
 
 	list := []module.Version{Target}
 	for _, r := range modFile.Require {
-		list = append(list, r.Mod)
+		if index != nil && index.exclude[r.Mod] {
+			if cfg.BuildMod == "mod" {
+				fmt.Fprintf(os.Stderr, "go: dropping requirement on excluded version %s %s\n", r.Mod.Path, r.Mod.Version)
+			} else {
+				fmt.Fprintf(os.Stderr, "go: ignoring requirement on excluded version %s %s\n", r.Mod.Path, r.Mod.Version)
+			}
+		} else {
+			list = append(list, r.Mod)
+		}
 	}
 	buildList = list
 }
@@ -483,15 +491,15 @@ func setDefaultBuildMod() {
 
 	if fi, err := os.Stat(filepath.Join(modRoot, "vendor")); err == nil && fi.IsDir() {
 		modGo := "unspecified"
-		if index.goVersion != "" {
-			if semver.Compare("v"+index.goVersion, "v1.14") >= 0 {
+		if index.goVersionV != "" {
+			if semver.Compare(index.goVersionV, "v1.14") >= 0 {
 				// The Go version is at least 1.14, and a vendor directory exists.
 				// Set -mod=vendor by default.
 				cfg.BuildMod = "vendor"
 				cfg.BuildModReason = "Go version in go.mod is at least 1.14 and vendor directory exists."
 				return
 			} else {
-				modGo = index.goVersion
+				modGo = index.goVersionV[1:]
 			}
 		}
 
