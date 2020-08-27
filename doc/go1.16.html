@@ -43,6 +43,15 @@ Do not send CLs removing the interior tags from such phrases.
 
 <h3 id="go-command">Go command</h3>
 
+<p><!-- golang.org/issue/24031 -->
+  <code>retract</code> directives may now be used in a <code>go.mod</code> file
+  to indicate that certain published versions of the module should not be used
+  by other modules. A module author may retract a version after a severe problem
+  is discovered or if the version was published unintentionally.<br>
+  TODO: write and link to section in golang.org/ref/mod<br>
+  TODO: write and link to tutorial or blog post
+</p>
+
 <p>
   TODO
 </p>
@@ -88,6 +97,18 @@ Do not send CLs removing the interior tags from such phrases.
 
 <p>
   TODO
+</p>
+
+<h3 id="net"><a href="/pkg/net/">net</a></h3>
+
+<p><!-- CL -->
+  The case of I/O on a closed network connection, or I/O on a network
+  connection that is closed before any of the I/O completes, can now
+  be detected using the new <a href="/pkg/net/#ErrClosed">ErrClosed</a> error.
+  A typical use would be <code>errors.Is(err, net.ErrClosed)</code>.
+  In earlier releases the only way to reliably detect this case was to
+  match the string returned by the <code>Error</code> method
+  with <code>"use of closed network connection"</code>.
 </p>
 
 <h3 id="unicode"><a href="/pkg/unicode/">unicode</a></h3>
