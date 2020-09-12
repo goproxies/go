@@ -14,7 +14,6 @@ import (
 	"cmd/go/internal/cfg"
 	"cmd/go/internal/modfetch"
 	"cmd/go/internal/modload"
-	"cmd/go/internal/work"
 
 	"golang.org/x/mod/module"
 )
@@ -64,7 +63,7 @@ func init() {
 
 	// TODO(jayconrod): https://golang.org/issue/35849 Apply -x to other 'go mod' commands.
 	cmdDownload.Flag.BoolVar(&cfg.BuildX, "x", false, "")
-	work.AddModCommonFlags(cmdDownload)
+	base.AddModCommonFlags(&cmdDownload.Flag)
 }
 
 type moduleJSON struct {
@@ -188,4 +187,7 @@ func runDownload(ctx context.Context, cmd *base.Command, args []string) {
 		}
 		base.ExitIfErrors()
 	}
+
+	// Update go.mod and especially go.sum if needed.
+	modload.WriteGoMod()
 }
