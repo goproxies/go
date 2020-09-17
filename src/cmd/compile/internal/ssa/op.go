@@ -5,6 +5,7 @@
 package ssa
 
 import (
+	"cmd/compile/internal/types"
 	"cmd/internal/obj"
 	"fmt"
 )
@@ -67,6 +68,71 @@ type regInfo struct {
 
 type auxType int8
 
+type Param struct {
+	Type   *types.Type
+	Offset int32 // TODO someday this will be a register
+}
+
+type AuxCall struct {
+	Fn      *obj.LSym
+	args    []Param // Includes receiver for method calls.  Does NOT include hidden closure pointer.
+	results []Param
+}
+
+// String returns
+// "AuxCall{<fn>(<args>)}"             if len(results) == 0;
+// "AuxCall{<fn>(<args>)<results[0]>}" if len(results) == 1;
+// "AuxCall{<fn>(<args>)(<results>)}"  otherwise.
+func (a *AuxCall) String() string {
+	var fn string
+	if a.Fn == nil {
+		fn = "AuxCall{nil" // could be interface/closure etc.
+	} else {
+		fn = fmt.Sprintf("AuxCall{%v", a.Fn)
+	}
+
+	if len(a.args) == 0 {
+		fn += "()"
+	} else {
+		s := "("
+		for _, arg := range a.args {
+			fn += fmt.Sprintf("%s[%v,%v]", s, arg.Type, arg.Offset)
+			s = ","
+		}
+		fn += ")"
+	}
+
+	if len(a.results) > 0 { // usual is zero or one; only some RT calls have more than one.
+		if len(a.results) == 1 {
+			fn += fmt.Sprintf("[%v,%v]", a.results[0].Type, a.results[0].Offset)
+		} else {
+			s := "("
+			for _, result := range a.results {
+				fn += fmt.Sprintf("%s[%v,%v]", s, result.Type, result.Offset)
+				s = ","
+			}
+			fn += ")"
+		}
+	}
+
+	return fn + "}"
+}
+
+// StaticAuxCall returns an AuxCall for a static call.
+func StaticAuxCall(sym *obj.LSym, args []Param, results []Param) *AuxCall {
+	return &AuxCall{Fn: sym, args: args, results: results}
+}
+
+// InterfaceAuxCall returns an AuxCall for an interface call.
+func InterfaceAuxCall(args []Param, results []Param) *AuxCall {
+	return &AuxCall{Fn: nil, args: args, results: results}
+}
+
+// ClosureAuxCall returns an AuxCall for a closure call.
+func ClosureAuxCall(args []Param, results []Param) *AuxCall {
+	return &AuxCall{Fn: nil, args: args, results: results}
+}
+
 const (
 	auxNone         auxType = iota
 	auxBool                 // auxInt is 0/1 for false/true
@@ -85,6 +151,8 @@ const (
 	auxTyp                  // aux is a type
 	auxTypSize              // aux is a type, auxInt is a size, must have Aux.(Type).Size() == AuxInt
 	auxCCop                 // aux is a ssa.Op that represents a flags-to-bool conversion (e.g. LessThan)
+	auxCall                 // aux is a *ssa.AuxCall
+	auxCallOff              // aux is a *ssa.AuxCall, AuxInt is int64 param (in+out) size
 
 	// architecture specific aux types
 	auxARM64BitField     // aux is an arm64 bitfield lsb and width packed into auxInt

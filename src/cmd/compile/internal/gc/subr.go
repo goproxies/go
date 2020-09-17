@@ -689,14 +689,14 @@ func convertop(srcConstant bool, src, dst *types.Type, why *string) Op {
 	// (a) Disallow (*T) to (*U) where T is go:notinheap but U isn't.
 	if src.IsPtr() && dst.IsPtr() && dst.Elem().NotInHeap() && !src.Elem().NotInHeap() {
 		if why != nil {
-			*why = fmt.Sprintf(":\n\t%v is go:notinheap, but %v is not", dst.Elem(), src.Elem())
+			*why = fmt.Sprintf(":\n\t%v is incomplete (or unallocatable), but %v is not", dst.Elem(), src.Elem())
 		}
 		return OXXX
 	}
 	// (b) Disallow string to []T where T is go:notinheap.
 	if src.IsString() && dst.IsSlice() && dst.Elem().NotInHeap() && (dst.Elem().Etype == types.Bytetype.Etype || dst.Elem().Etype == types.Runetype.Etype) {
 		if why != nil {
-			*why = fmt.Sprintf(":\n\t%v is go:notinheap", dst.Elem())
+			*why = fmt.Sprintf(":\n\t%v is incomplete (or unallocatable)", dst.Elem())
 		}
 		return OXXX
 	}
@@ -928,16 +928,20 @@ func (o Op) IsSlice3() bool {
 	return false
 }
 
-// slicePtrLen extracts the pointer and length from a slice.
+// backingArrayPtrLen extracts the pointer and length from a slice or string.
 // This constructs two nodes referring to n, so n must be a cheapexpr.
-func (n *Node) slicePtrLen() (ptr, len *Node) {
+func (n *Node) backingArrayPtrLen() (ptr, len *Node) {
 	var init Nodes
 	c := cheapexpr(n, &init)
 	if c != n || init.Len() != 0 {
-		Fatalf("slicePtrLen not cheap: %v", n)
+		Fatalf("backingArrayPtrLen not cheap: %v", n)
 	}
 	ptr = nod(OSPTR, n, nil)
-	ptr.Type = n.Type.Elem().PtrTo()
+	if n.Type.IsString() {
+		ptr.Type = types.Types[TUINT8].PtrTo()
+	} else {
+		ptr.Type = n.Type.Elem().PtrTo()
+	}
 	len = nod(OLEN, n, nil)
 	len.Type = types.Types[TINT]
 	return ptr, len
