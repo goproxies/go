@@ -1853,6 +1853,9 @@ const (
 	OpPPC64SLW
 	OpPPC64ROTL
 	OpPPC64ROTLW
+	OpPPC64RLDICL
+	OpPPC64CLRLSLWI
+	OpPPC64CLRLSLDI
 	OpPPC64LoweredAdd64Carry
 	OpPPC64SRADconst
 	OpPPC64SRAWconst
@@ -2714,6 +2717,7 @@ const (
 	OpSP
 	OpSB
 	OpLoad
+	OpDereference
 	OpStore
 	OpMove
 	OpZero
@@ -2727,6 +2731,7 @@ const (
 	OpClosureCall
 	OpStaticCall
 	OpInterCall
+	OpStaticLECall
 	OpSignExt8to16
 	OpSignExt8to32
 	OpSignExt8to64
@@ -2823,6 +2828,8 @@ const (
 	OpCvt64Fto64U
 	OpSelect0
 	OpSelect1
+	OpSelectN
+	OpSelectNAddr
 	OpAtomicLoad8
 	OpAtomicLoad32
 	OpAtomicLoad64
@@ -24673,6 +24680,48 @@ var opcodeTable = [...]opInfo{
 		},
 	},
 	{
+		name:    "RLDICL",
+		auxType: auxInt32,
+		argLen:  1,
+		asm:     ppc64.ARLDICL,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1073733630}, // SP SB R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+			outputs: []outputInfo{
+				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+		},
+	},
+	{
+		name:    "CLRLSLWI",
+		auxType: auxInt32,
+		argLen:  1,
+		asm:     ppc64.ACLRLSLWI,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1073733630}, // SP SB R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+			outputs: []outputInfo{
+				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+		},
+	},
+	{
+		name:    "CLRLSLDI",
+		auxType: auxInt32,
+		argLen:  1,
+		asm:     ppc64.ACLRLSLDI,
+		reg: regInfo{
+			inputs: []inputInfo{
+				{0, 1073733630}, // SP SB R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+			outputs: []outputInfo{
+				{0, 1073733624}, // R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R14 R15 R16 R17 R18 R19 R20 R21 R22 R23 R24 R25 R26 R27 R28 R29
+			},
+		},
+	},
+	{
 		name:            "LoweredAdd64Carry",
 		argLen:          3,
 		resultNotInArgs: true,
@@ -34698,6 +34747,11 @@ var opcodeTable = [...]opInfo{
 		generic: true,
 	},
 	{
+		name:    "Dereference",
+		argLen:  2,
+		generic: true,
+	},
+	{
 		name:    "Store",
 		auxType: auxTyp,
 		argLen:  3,
@@ -34779,6 +34833,13 @@ var opcodeTable = [...]opInfo{
 		name:    "InterCall",
 		auxType: auxCallOff,
 		argLen:  2,
+		call:    true,
+		generic: true,
+	},
+	{
+		name:    "StaticLECall",
+		auxType: auxCallOff,
+		argLen:  -1,
 		call:    true,
 		generic: true,
 	},
@@ -35282,6 +35343,18 @@ var opcodeTable = [...]opInfo{
 		argLen:    1,
 		zeroWidth: true,
 		generic:   true,
+	},
+	{
+		name:    "SelectN",
+		auxType: auxInt64,
+		argLen:  1,
+		generic: true,
+	},
+	{
+		name:    "SelectNAddr",
+		auxType: auxInt64,
+		argLen:  1,
+		generic: true,
 	},
 	{
 		name:    "AtomicLoad8",
