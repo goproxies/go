@@ -623,6 +623,9 @@ func typecheck1(n *Node, top int) (res *Node) {
 			// no defaultlit for left
 			// the outer context gives the type
 			n.Type = l.Type
+			if (l.Type == types.Idealfloat || l.Type == types.Idealcomplex) && r.Op == OLITERAL {
+				n.Type = types.Idealint
+			}
 
 			break
 		}
@@ -713,8 +716,11 @@ func typecheck1(n *Node, top int) (res *Node) {
 			}
 		}
 
-		if !okfor[op][et] {
-			yyerror("invalid operation: %v (operator %v not defined on %s)", n, op, typekind(t))
+		if t.Etype == TIDEAL {
+			t = mixUntyped(l.Type, r.Type)
+		}
+		if dt := defaultType(t); !okfor[op][dt.Etype] {
+			yyerror("invalid operation: %v (operator %v not defined on %v)", n, op, t)
 			n.Type = nil
 			return n
 		}
@@ -753,15 +759,7 @@ func typecheck1(n *Node, top int) (res *Node) {
 			}
 		}
 
-		t = l.Type
 		if iscmp[n.Op] {
-			// TIDEAL includes complex constant, but only OEQ and ONE are defined for complex,
-			// so check that the n.op is available for complex  here before doing evconst.
-			if !okfor[n.Op][TCOMPLEX128] && (Isconst(l, CTCPLX) || Isconst(r, CTCPLX)) {
-				yyerror("invalid operation: %v (operator %v not defined on untyped complex)", n, n.Op)
-				n.Type = nil
-				return n
-			}
 			evconst(n)
 			t = types.Idealbool
 			if n.Op != OLITERAL {
@@ -808,8 +806,8 @@ func typecheck1(n *Node, top int) (res *Node) {
 			n.Type = nil
 			return n
 		}
-		if !okfor[n.Op][t.Etype] {
-			yyerror("invalid operation: %v %v", n.Op, t)
+		if !okfor[n.Op][defaultType(t).Etype] {
+			yyerror("invalid operation: %v (operator %v not defined on %s)", n, n.Op, typekind(t))
 			n.Type = nil
 			return n
 		}
@@ -1678,7 +1676,7 @@ func typecheck1(n *Node, top int) (res *Node) {
 		}
 		var why string
 		n.Op = convertop(n.Left.Op == OLITERAL, t, n.Type, &why)
-		if n.Op == 0 {
+		if n.Op == OXXX {
 			if !n.Diag() && !n.Type.Broke() && !n.Left.Diag() {
 				yyerror("cannot convert %L to type %v%s", n.Left, n.Type, why)
 				n.SetDiag(true)
@@ -2702,13 +2700,13 @@ func errorDetails(nl Nodes, tstruct *types.Type, isddd bool) string {
 			return ""
 		}
 	}
-	return fmt.Sprintf("\n\thave %s\n\twant %v", nl.retsigerr(isddd), tstruct)
+	return fmt.Sprintf("\n\thave %s\n\twant %v", nl.sigerr(isddd), tstruct)
 }
 
 // sigrepr is a type's representation to the outside world,
 // in string representations of return signatures
 // e.g in error messages about wrong arguments to return.
-func sigrepr(t *types.Type) string {
+func sigrepr(t *types.Type, isddd bool) string {
 	switch t {
 	case types.Idealstring:
 		return "string"
@@ -2723,26 +2721,29 @@ func sigrepr(t *types.Type) string {
 		return "number"
 	}
 
+	// Turn []T... argument to ...T for clearer error message.
+	if isddd {
+		if !t.IsSlice() {
+			Fatalf("bad type for ... argument: %v", t)
+		}
+		return "..." + t.Elem().String()
+	}
 	return t.String()
 }
 
-// retsigerr returns the signature of the types
-// at the respective return call site of a function.
-func (nl Nodes) retsigerr(isddd bool) string {
+// sigerr returns the signature of the types at the call or return.
+func (nl Nodes) sigerr(isddd bool) string {
 	if nl.Len() < 1 {
 		return "()"
 	}
 
 	var typeStrings []string
-	for _, n := range nl.Slice() {
-		typeStrings = append(typeStrings, sigrepr(n.Type))
+	for i, n := range nl.Slice() {
+		isdddArg := isddd && i == nl.Len()-1
+		typeStrings = append(typeStrings, sigrepr(n.Type, isdddArg))
 	}
 
-	ddd := ""
-	if isddd {
-		ddd = "..."
-	}
-	return fmt.Sprintf("(%s%s)", strings.Join(typeStrings, ", "), ddd)
+	return fmt.Sprintf("(%s)", strings.Join(typeStrings, ", "))
 }
 
 // type check composite
