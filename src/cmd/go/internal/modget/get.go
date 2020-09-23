@@ -284,7 +284,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 	if cfg.Insecure {
 		fmt.Fprintf(os.Stderr, "go get: -insecure flag is deprecated; see 'go help get' for details\n")
 	}
-	modload.LoadTests = *getT
+	load.ModResolveTests = *getT
 
 	// Do not allow any updating of go.mod until we've applied
 	// all the requested changes and checked that the result matches
@@ -314,7 +314,7 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 
 	// Add missing modules to the build list.
 	// We call SetBuildList here and elsewhere, since newUpgrader,
-	// ImportPathsQuiet, and other functions read the global build list.
+	// LoadPackages, and other functions read the global build list.
 	for _, q := range queries {
 		if _, ok := selectedVersion[q.m.Path]; !ok && q.m.Version != "none" {
 			buildList = append(buildList, q.m)
@@ -400,9 +400,16 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 
 		if len(pkgPatterns) > 0 {
 			// Don't load packages if pkgPatterns is empty. Both
-			// modload.ImportPathsQuiet and ModulePackages convert an empty list
+			// modload.LoadPackages and ModulePackages convert an empty list
 			// of patterns to []string{"."}, which is not what we want.
-			matches = modload.ImportPathsQuiet(ctx, pkgPatterns, imports.AnyTags())
+			loadOpts := modload.PackageOpts{
+				Tags:                     imports.AnyTags(),
+				ResolveMissingImports:    true, // dubious; see https://golang.org/issue/32567
+				LoadTests:                *getT,
+				SilenceErrors:            true, // Errors may be fixed by subsequent upgrades or downgrades.
+				SilenceUnmatchedWarnings: true, // We will warn after iterating below.
+			}
+			matches, _ = modload.LoadPackages(ctx, loadOpts, pkgPatterns...)
 			seenPkgs = make(map[string]bool)
 			for i, match := range matches {
 				arg := pkgGets[i]
@@ -474,14 +481,6 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 			break
 		}
 		prevBuildList = buildList
-	}
-	if *getD {
-		// Only print warnings after the last iteration, and only if we aren't going
-		// to build (to avoid doubled warnings).
-		//
-		// Only local patterns in the main module, such as './...', can be unmatched.
-		// (See the mod_get_nopkgs test for more detail.)
-		search.WarnUnmatched(matches)
 	}
 
 	// Handle downgrades.
@@ -572,6 +571,37 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 		base.Fatalf("%v", buf.String())
 	}
 
+	if len(pkgPatterns) > 0 || len(args) == 0 {
+		// Before we write the updated go.mod file, reload the requested packages to
+		// check for errors.
+		loadOpts := modload.PackageOpts{
+			Tags:      imports.AnyTags(),
+			LoadTests: *getT,
+
+			// Only print warnings after the last iteration, and only if we aren't going
+			// to build (to avoid doubled warnings).
+			//
+			// Only local patterns in the main module, such as './...', can be unmatched.
+			// (See the mod_get_nopkgs test for more detail.)
+			SilenceUnmatchedWarnings: !*getD,
+		}
+		modload.LoadPackages(ctx, loadOpts, pkgPatterns...)
+	}
+
+	// If -d was specified, we're done after the module work.
+	// We've already downloaded modules by loading packages above.
+	// Otherwise, we need to build and install the packages matched by
+	// command line arguments. This may be a different set of packages,
+	// since we only build packages for the target platform.
+	// Note that 'go get -u' without arguments is equivalent to
+	// 'go get -u .', so we'll typically build the package in the current
+	// directory.
+	if !*getD && len(pkgPatterns) > 0 {
+		work.BuildInit()
+		pkgs := load.PackagesForBuild(ctx, pkgPatterns)
+		work.InstallPackages(ctx, pkgPatterns, pkgs)
+	}
+
 	// Everything succeeded. Update go.mod.
 	modload.AllowWriteGoMod()
 	modload.WriteGoMod()
@@ -584,21 +614,6 @@ func runGet(ctx context.Context, cmd *base.Command, args []string) {
 	// contains information about direct dependencies that WriteGoMod uses.
 	// Refactor to avoid these kinds of global side effects.
 	reportRetractions(ctx)
-
-	// If -d was specified, we're done after the module work.
-	// We've already downloaded modules by loading packages above.
-	// Otherwise, we need to build and install the packages matched by
-	// command line arguments. This may be a different set of packages,
-	// since we only build packages for the target platform.
-	// Note that 'go get -u' without arguments is equivalent to
-	// 'go get -u .', so we'll typically build the package in the current
-	// directory.
-	if *getD || len(pkgPatterns) == 0 {
-		return
-	}
-	work.BuildInit()
-	pkgs := load.PackagesForBuild(ctx, pkgPatterns)
-	work.InstallPackages(ctx, pkgPatterns, pkgs)
 }
 
 // parseArgs parses command-line arguments and reports errors.
