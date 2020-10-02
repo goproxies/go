@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"html"
 	"os"
+	"path/filepath"
 	"sort"
-	"strings"
 
 	"bufio"
 	"bytes"
@@ -27,6 +27,7 @@ var ssaConfig *ssa.Config
 var ssaCaches []ssa.Cache
 
 var ssaDump string     // early copy of $GOSSAFUNC; the func name to dump output for
+var ssaDir string      // optional destination for ssa dump file
 var ssaDumpStdout bool // whether to dump to stdout
 var ssaDumpCFG string  // generate CFGs for these phases
 const ssaDumpFile = "ssa.html"
@@ -61,9 +62,6 @@ func initssaconfig() {
 	_ = types.NewPtr(types.Errortype)                                 // *error
 	types.NewPtrCacheEnabled = false
 	ssaConfig = ssa.NewConfig(thearch.LinkArch.Name, *types_, Ctxt, Debug['N'] == 0)
-	if thearch.LinkArch.Name == "386" {
-		ssaConfig.Set387(thearch.Use387)
-	}
 	ssaConfig.SoftFloat = thearch.SoftFloat
 	ssaConfig.Race = flag_race
 	ssaCaches = make([]ssa.Cache, nBackendWorkers)
@@ -173,10 +171,6 @@ func initssaconfig() {
 		ExtendCheckFunc[ssa.BoundsSlice3C] = sysvar("panicExtendSlice3C")
 		ExtendCheckFunc[ssa.BoundsSlice3CU] = sysvar("panicExtendSlice3CU")
 	}
-
-	// GO386=387 runtime definitions
-	ControlWord64trunc = sysvar("controlWord64trunc") // uint16
-	ControlWord32 = sysvar("controlWord32")           // uint16
 
 	// Wasm (all asm funcs with special ABIs)
 	WasmMove = sysvar("wasmMove")
@@ -347,7 +341,13 @@ func buildssa(fn *Node, worker int) *ssa.Func {
 	s.f.Entry.Pos = fn.Pos
 
 	if printssa {
-		s.f.HTMLWriter = ssa.NewHTMLWriter(ssaDumpFile, s.f, ssaDumpCFG)
+		ssaDF := ssaDumpFile
+		if ssaDir != "" {
+			ssaDF = filepath.Join(ssaDir, myimportpath+"."+name+".html")
+			ssaD := filepath.Dir(ssaDF)
+			os.MkdirAll(ssaD, 0755)
+		}
+		s.f.HTMLWriter = ssa.NewHTMLWriter(ssaDF, s.f, ssaDumpCFG)
 		// TODO: generate and print a mapping from nodes to values and blocks
 		dumpSourcesColumn(s.f.HTMLWriter, fn)
 		s.f.HTMLWriter.WriteAST("AST", astBuf)
@@ -2557,22 +2557,22 @@ func (s *state) expr(n *Node) *ssa.Value {
 		return s.addr(n.Left)
 
 	case ORESULT:
-		if s.prevCall == nil || s.prevCall.Op != ssa.OpStaticLECall {
+		if s.prevCall == nil || s.prevCall.Op != ssa.OpStaticLECall && s.prevCall.Op != ssa.OpInterLECall && s.prevCall.Op != ssa.OpClosureLECall {
 			// Do the old thing
 			addr := s.constOffPtrSP(types.NewPtr(n.Type), n.Xoffset)
-			return s.load(n.Type, addr)
+			return s.rawLoad(n.Type, addr)
 		}
 		which := s.prevCall.Aux.(*ssa.AuxCall).ResultForOffset(n.Xoffset)
 		if which == -1 {
 			// Do the old thing // TODO: Panic instead.
 			addr := s.constOffPtrSP(types.NewPtr(n.Type), n.Xoffset)
-			return s.load(n.Type, addr)
+			return s.rawLoad(n.Type, addr)
 		}
 		if canSSAType(n.Type) {
 			return s.newValue1I(ssa.OpSelectN, n.Type, which, s.prevCall)
 		} else {
 			addr := s.newValue1I(ssa.OpSelectNAddr, types.NewPtr(n.Type), which, s.prevCall)
-			return s.load(n.Type, addr)
+			return s.rawLoad(n.Type, addr)
 		}
 
 	case ODEREF:
@@ -4375,11 +4375,11 @@ func (s *state) call(n *Node, k callKind, returnResultAddr bool) *ssa.Value {
 
 	switch n.Op {
 	case OCALLFUNC:
+		if k != callDeferStack && ssa.LateCallExpansionEnabledWithin(s.f) {
+			testLateExpansion = true
+		}
 		if k == callNormal && fn.Op == ONAME && fn.Class() == PFUNC {
 			sym = fn.Sym
-			if !returnResultAddr && strings.Contains(sym.Name, "testLateExpansion") {
-				testLateExpansion = true
-			}
 			break
 		}
 		closure = s.expr(fn)
@@ -4392,11 +4392,11 @@ func (s *state) call(n *Node, k callKind, returnResultAddr bool) *ssa.Value {
 		if fn.Op != ODOTMETH {
 			s.Fatalf("OCALLMETH: n.Left not an ODOTMETH: %v", fn)
 		}
+		if k != callDeferStack && ssa.LateCallExpansionEnabledWithin(s.f) {
+			testLateExpansion = true
+		}
 		if k == callNormal {
 			sym = fn.Sym
-			if !returnResultAddr && strings.Contains(sym.Name, "testLateExpansion") {
-				testLateExpansion = true
-			}
 			break
 		}
 		closure = s.getMethodClosure(fn)
@@ -4405,6 +4405,9 @@ func (s *state) call(n *Node, k callKind, returnResultAddr bool) *ssa.Value {
 	case OCALLINTER:
 		if fn.Op != ODOTINTER {
 			s.Fatalf("OCALLINTER: n.Left not an ODOTINTER: %v", fn.Op)
+		}
+		if k != callDeferStack && ssa.LateCallExpansionEnabledWithin(s.f) {
+			testLateExpansion = true
 		}
 		var iclosure *ssa.Value
 		iclosure, rcvr = s.getClosureAndRcvr(fn)
@@ -4544,9 +4547,21 @@ func (s *state) call(n *Node, k callKind, returnResultAddr bool) *ssa.Value {
 		// call target
 		switch {
 		case k == callDefer:
-			call = s.newValue1A(ssa.OpStaticCall, types.TypeMem, ssa.StaticAuxCall(deferproc, ACArgs, ACResults), s.mem())
+			aux := ssa.StaticAuxCall(deferproc, ACArgs, ACResults)
+			if testLateExpansion {
+				call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux)
+				call.AddArgs(callArgs...)
+			} else {
+				call = s.newValue1A(ssa.OpStaticCall, types.TypeMem, aux, s.mem())
+			}
 		case k == callGo:
-			call = s.newValue1A(ssa.OpStaticCall, types.TypeMem, ssa.StaticAuxCall(newproc, ACArgs, ACResults), s.mem())
+			aux := ssa.StaticAuxCall(newproc, ACArgs, ACResults)
+			if testLateExpansion {
+				call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux)
+				call.AddArgs(callArgs...)
+			} else {
+				call = s.newValue1A(ssa.OpStaticCall, types.TypeMem, aux, s.mem())
+			}
 		case closure != nil:
 			// rawLoad because loading the code pointer from a
 			// closure is always safe, but IsSanitizerSafeAddr
@@ -4554,18 +4569,25 @@ func (s *state) call(n *Node, k callKind, returnResultAddr bool) *ssa.Value {
 			// critical that we not clobber any arguments already
 			// stored onto the stack.
 			codeptr = s.rawLoad(types.Types[TUINTPTR], closure)
-			call = s.newValue3A(ssa.OpClosureCall, types.TypeMem, ssa.ClosureAuxCall(ACArgs, ACResults), codeptr, closure, s.mem())
+			if testLateExpansion {
+				aux := ssa.ClosureAuxCall(ACArgs, ACResults)
+				call = s.newValue2A(ssa.OpClosureLECall, aux.LateExpansionResultType(), aux, codeptr, closure)
+				call.AddArgs(callArgs...)
+			} else {
+				call = s.newValue3A(ssa.OpClosureCall, types.TypeMem, ssa.ClosureAuxCall(ACArgs, ACResults), codeptr, closure, s.mem())
+			}
 		case codeptr != nil:
-			call = s.newValue2A(ssa.OpInterCall, types.TypeMem, ssa.InterfaceAuxCall(ACArgs, ACResults), codeptr, s.mem())
+			if testLateExpansion {
+				aux := ssa.InterfaceAuxCall(ACArgs, ACResults)
+				call = s.newValue1A(ssa.OpInterLECall, aux.LateExpansionResultType(), aux, codeptr)
+				call.AddArgs(callArgs...)
+			} else {
+				call = s.newValue2A(ssa.OpInterCall, types.TypeMem, ssa.InterfaceAuxCall(ACArgs, ACResults), codeptr, s.mem())
+			}
 		case sym != nil:
 			if testLateExpansion {
-				var tys []*types.Type
 				aux := ssa.StaticAuxCall(sym.Linksym(), ACArgs, ACResults)
-				for i := int64(0); i < aux.NResults(); i++ {
-					tys = append(tys, aux.TypeOfResult(i))
-				}
-				tys = append(tys, types.TypeMem)
-				call = s.newValue0A(ssa.OpStaticLECall, types.NewResults(tys), aux)
+				call = s.newValue0A(ssa.OpStaticLECall, aux.LateExpansionResultType(), aux)
 				call.AddArgs(callArgs...)
 			} else {
 				call = s.newValue1A(ssa.OpStaticCall, types.TypeMem, ssa.StaticAuxCall(sym.Linksym(), ACArgs, ACResults), s.mem())
@@ -4606,7 +4628,11 @@ func (s *state) call(n *Node, k callKind, returnResultAddr bool) *ssa.Value {
 	}
 	fp := res.Field(0)
 	if returnResultAddr {
-		return s.constOffPtrSP(types.NewPtr(fp.Type), fp.Offset+Ctxt.FixedFrameSize())
+		pt := types.NewPtr(fp.Type)
+		if testLateExpansion {
+			return s.newValue1I(ssa.OpSelectNAddr, pt, 0, call)
+		}
+		return s.constOffPtrSP(pt, fp.Offset+Ctxt.FixedFrameSize())
 	}
 
 	if testLateExpansion {
@@ -4710,7 +4736,7 @@ func (s *state) addr(n *Node) *ssa.Value {
 		}
 	case ORESULT:
 		// load return from callee
-		if s.prevCall == nil || s.prevCall.Op != ssa.OpStaticLECall {
+		if s.prevCall == nil || s.prevCall.Op != ssa.OpStaticLECall && s.prevCall.Op != ssa.OpInterLECall && s.prevCall.Op != ssa.OpClosureLECall {
 			return s.constOffPtrSP(t, n.Xoffset)
 		}
 		which := s.prevCall.Aux.(*ssa.AuxCall).ResultForOffset(n.Xoffset)
@@ -5913,9 +5939,7 @@ type SSAGenState struct {
 	// bstart remembers where each block starts (indexed by block ID)
 	bstart []*obj.Prog
 
-	// 387 port: maps from SSE registers (REG_X?) to 387 registers (REG_F?)
-	SSEto387 map[int16]int16
-	// Some architectures require a 64-bit temporary for FP-related register shuffling. Examples include x86-387, PPC, and Sparc V8.
+	// Some architectures require a 64-bit temporary for FP-related register shuffling. Examples include PPC and Sparc V8.
 	ScratchFpMem *Node
 
 	maxarg int64 // largest frame size for arguments to calls made by the function
@@ -6080,10 +6104,6 @@ func genssa(f *ssa.Func, pp *Progs) {
 		progToBlock = make(map[*obj.Prog]*ssa.Block, f.NumBlocks())
 		f.Logf("genssa %s\n", f.Name)
 		progToBlock[s.pp.next] = f.Blocks[0]
-	}
-
-	if thearch.Use387 {
-		s.SSEto387 = map[int16]int16{}
 	}
 
 	s.ScratchFpMem = e.scratchFpMem

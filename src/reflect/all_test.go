@@ -2405,8 +2405,14 @@ func TestVariadicMethodValue(t *testing.T) {
 	points := []Point{{20, 21}, {22, 23}, {24, 25}}
 	want := int64(p.TotalDist(points[0], points[1], points[2]))
 
+	// Variadic method of type.
+	tfunc := TypeOf((func(Point, ...Point) int)(nil))
+	if tt := TypeOf(p).Method(4).Type; tt != tfunc {
+		t.Errorf("Variadic Method Type from TypeOf is %s; want %s", tt, tfunc)
+	}
+
 	// Curried method of value.
-	tfunc := TypeOf((func(...Point) int)(nil))
+	tfunc = TypeOf((func(...Point) int)(nil))
 	v := ValueOf(p).Method(4)
 	if tt := v.Type(); tt != tfunc {
 		t.Errorf("Variadic Method Type is %s; want %s", tt, tfunc)
@@ -4259,24 +4265,6 @@ var gFloat32 float32
 
 func TestConvertNaNs(t *testing.T) {
 	const snan uint32 = 0x7f800001
-
-	// Test to see if a store followed by a load of a signaling NaN
-	// maintains the signaling bit. The only platform known to fail
-	// this test is 386,GO386=387. The real test below will always fail
-	// if the platform can't even store+load a float without mucking
-	// with the bits.
-	gFloat32 = math.Float32frombits(snan)
-	runtime.Gosched() // make sure we don't optimize the store/load away
-	r := math.Float32bits(gFloat32)
-	if r != snan {
-		// This should only happen on 386,GO386=387. We have no way to
-		// test for 387, so we just make sure we're at least on 386.
-		if runtime.GOARCH != "386" {
-			t.Errorf("store/load of sNaN not faithful")
-		}
-		t.Skip("skipping test, float store+load not faithful")
-	}
-
 	type myFloat32 float32
 	x := V(myFloat32(math.Float32frombits(snan)))
 	y := x.Convert(TypeOf(float32(0)))
