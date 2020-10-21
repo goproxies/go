@@ -23,6 +23,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/fstest"
 	"time"
 )
 
@@ -2526,7 +2527,7 @@ func testDoubleCloseError(t *testing.T, path string) {
 	if err := file.Close(); err == nil {
 		t.Error("second Close did not fail")
 	} else if pe, ok := err.(*PathError); !ok {
-		t.Errorf("second Close returned unexpected error type %T; expected os.PathError", pe)
+		t.Errorf("second Close returned unexpected error type %T; expected fs.PathError", pe)
 	} else if pe.Err != ErrClosed {
 		t.Errorf("second Close returned %q, wanted %q", err, ErrClosed)
 	} else {
@@ -2669,5 +2670,11 @@ func TestOpenFileKeepsPermissions(t *testing.T) {
 		t.Error(err)
 	} else if fi.Mode()&0222 == 0 {
 		t.Errorf("Stat after OpenFile is %v, should be writable", fi.Mode())
+	}
+}
+
+func TestDirFS(t *testing.T) {
+	if err := fstest.TestFS(DirFS("./signal"), "signal.go", "internal/pty/pty.go"); err != nil {
+		t.Fatal(err)
 	}
 }

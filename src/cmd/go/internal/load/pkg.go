@@ -14,6 +14,7 @@ import (
 	"go/build"
 	"go/scanner"
 	"go/token"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	pathpkg "path"
@@ -27,6 +28,7 @@ import (
 
 	"cmd/go/internal/base"
 	"cmd/go/internal/cfg"
+	"cmd/go/internal/fsys"
 	"cmd/go/internal/modinfo"
 	"cmd/go/internal/modload"
 	"cmd/go/internal/par"
@@ -59,6 +61,7 @@ type PackagePublic struct {
 	ConflictDir   string                `json:",omitempty"` // Dir is hidden by this other directory
 	ForTest       string                `json:",omitempty"` // package is only for use in named test
 	Export        string                `json:",omitempty"` // file containing export data (set by go list -export)
+	BuildID       string                `json:",omitempty"` // build ID of the export data (set by go list -export)
 	Module        *modinfo.ModulePublic `json:",omitempty"` // info about package's module, if any
 	Match         []string              `json:",omitempty"` // command-line patterns matching this package
 	Goroot        bool                  `json:",omitempty"` // is this package found in the Go root?
@@ -975,7 +978,7 @@ var isDirCache par.Cache
 
 func isDir(path string) bool {
 	return isDirCache.Do(path, func() interface{} {
-		fi, err := os.Stat(path)
+		fi, err := fsys.Stat(path)
 		return err == nil && fi.IsDir()
 	}).(bool)
 }
@@ -2143,7 +2146,7 @@ func PackagesAndErrors(ctx context.Context, patterns []string) []*Package {
 		if strings.HasSuffix(p, ".go") {
 			// We need to test whether the path is an actual Go file and not a
 			// package path or pattern ending in '.go' (see golang.org/issue/34653).
-			if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			if fi, err := fsys.Stat(p); err == nil && !fi.IsDir() {
 				return []*Package{GoFilesPackage(ctx, patterns)}
 			}
 		}
@@ -2300,10 +2303,10 @@ func GoFilesPackage(ctx context.Context, gofiles []string) *Package {
 	// to make it look like this is a standard package or
 	// command directory. So that local imports resolve
 	// consistently, the files must all be in the same directory.
-	var dirent []os.FileInfo
+	var dirent []fs.FileInfo
 	var dir string
 	for _, file := range gofiles {
-		fi, err := os.Stat(file)
+		fi, err := fsys.Stat(file)
 		if err != nil {
 			base.Fatalf("%s", err)
 		}
@@ -2321,7 +2324,7 @@ func GoFilesPackage(ctx context.Context, gofiles []string) *Package {
 		}
 		dirent = append(dirent, fi)
 	}
-	ctxt.ReadDir = func(string) ([]os.FileInfo, error) { return dirent, nil }
+	ctxt.ReadDir = func(string) ([]fs.FileInfo, error) { return dirent, nil }
 
 	if cfg.ModulesEnabled {
 		modload.ImportFromFiles(ctx, gofiles)
