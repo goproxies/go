@@ -1695,7 +1695,7 @@ func allocm(_p_ *p, fn func(), id int64) *m {
 // When the callback is done with the m, it calls dropm to
 // put the m back on the list.
 //go:nosplit
-func needm(x byte) {
+func needm() {
 	if (iscgo || GOOS == "windows") && !cgoHasExtraM {
 		// Can happen if C/C++ code calls Go from a global ctor.
 		// Can also happen on Windows if a global ctor uses a
@@ -1740,8 +1740,8 @@ func needm(x byte) {
 	// which is more than enough for us.
 	setg(mp.g0)
 	_g_ := getg()
-	_g_.stack.hi = uintptr(noescape(unsafe.Pointer(&x))) + 1024
-	_g_.stack.lo = uintptr(noescape(unsafe.Pointer(&x))) - 32*1024
+	_g_.stack.hi = getcallersp() + 1024
+	_g_.stack.lo = getcallersp() - 32*1024
 	_g_.stackguard0 = _g_.stack.lo + _StackGuard
 
 	// Initialize this thread to use the m.
@@ -3208,7 +3208,8 @@ func goexit0(gp *g) {
 		// Flush assist credit to the global pool. This gives
 		// better information to pacing if the application is
 		// rapidly creating an exiting goroutines.
-		scanCredit := int64(gcController.assistWorkPerByte * float64(gp.gcAssistBytes))
+		assistWorkPerByte := float64frombits(atomic.Load64(&gcController.assistWorkPerByte))
+		scanCredit := int64(assistWorkPerByte * float64(gp.gcAssistBytes))
 		atomic.Xaddint64(&gcController.bgScanCredit, scanCredit)
 		gp.gcAssistBytes = 0
 	}
@@ -4243,7 +4244,7 @@ func sigprof(pc, sp, lr uintptr, gp *g, mp *m) {
 	// First, it may be that the g switch has no PC update, because the SP
 	// either corresponds to a user g throughout (as in asmcgocall)
 	// or because it has been arranged to look like a user g frame
-	// (as in cgocallback_gofunc). In this case, since the entire
+	// (as in cgocallback). In this case, since the entire
 	// transition is a g+SP update, a partial transition updating just one of
 	// those will be detected by the stack bounds check.
 	//
