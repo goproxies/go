@@ -15834,12 +15834,12 @@ func rewriteValueAMD64_OpAMD64MULLconst(v *Value) bool {
 		return true
 	}
 	// match: (MULLconst [c] x)
-	// cond: isPowerOfTwo(int64(c)+1) && c >= 15
+	// cond: isPowerOfTwo64(int64(c)+1) && c >= 15
 	// result: (SUBL (SHLLconst <v.Type> [int8(log2(int64(c)+1))] x) x)
 	for {
 		c := auxIntToInt32(v.AuxInt)
 		x := v_0
-		if !(isPowerOfTwo(int64(c)+1) && c >= 15) {
+		if !(isPowerOfTwo64(int64(c)+1) && c >= 15) {
 			break
 		}
 		v.reset(OpAMD64SUBL)
@@ -16281,12 +16281,12 @@ func rewriteValueAMD64_OpAMD64MULQconst(v *Value) bool {
 		return true
 	}
 	// match: (MULQconst [c] x)
-	// cond: isPowerOfTwo(int64(c)+1) && c >= 15
+	// cond: isPowerOfTwo64(int64(c)+1) && c >= 15
 	// result: (SUBQ (SHLQconst <v.Type> [int8(log2(int64(c)+1))] x) x)
 	for {
 		c := auxIntToInt32(v.AuxInt)
 		x := v_0
-		if !(isPowerOfTwo(int64(c)+1) && c >= 15) {
+		if !(isPowerOfTwo64(int64(c)+1) && c >= 15) {
 			break
 		}
 		v.reset(OpAMD64SUBQ)
@@ -29719,11 +29719,11 @@ func rewriteValueAMD64_OpConst8(v *Value) bool {
 }
 func rewriteValueAMD64_OpConstBool(v *Value) bool {
 	// match: (ConstBool [c])
-	// result: (MOVLconst [int32(b2i(c))])
+	// result: (MOVLconst [b2i32(c)])
 	for {
 		c := auxIntToBool(v.AuxInt)
 		v.reset(OpAMD64MOVLconst)
-		v.AuxInt = int32ToAuxInt(int32(b2i(c)))
+		v.AuxInt = int32ToAuxInt(b2i32(c))
 		return true
 	}
 }
