@@ -212,21 +212,7 @@ func isSigned(t *types.Type) bool {
 
 // mergeSym merges two symbolic offsets. There is no real merging of
 // offsets, we just pick the non-nil one.
-func mergeSym(x, y interface{}) interface{} {
-	if x == nil {
-		return y
-	}
-	if y == nil {
-		return x
-	}
-	panic(fmt.Sprintf("mergeSym with two non-nil syms %s %s", x, y))
-}
-
-func canMergeSym(x, y interface{}) bool {
-	return x == nil || y == nil
-}
-
-func mergeSymTyped(x, y Sym) Sym {
+func mergeSym(x, y Sym) Sym {
 	if x == nil {
 		return y
 	}
@@ -234,6 +220,10 @@ func mergeSymTyped(x, y Sym) Sym {
 		return x
 	}
 	panic(fmt.Sprintf("mergeSym with two non-nil syms %v %v", x, y))
+}
+
+func canMergeSym(x, y Sym) bool {
+	return x == nil || y == nil
 }
 
 // canMergeLoadClobber reports whether the load can be merged into target without
@@ -420,12 +410,6 @@ func oneBit64(x int64) bool { return x&(x-1) == 0 && x != 0 }
 // nto returns the number of trailing ones.
 func nto(x int64) int64 {
 	return int64(ntz64(^x))
-}
-
-// log2 returns logarithm in base 2 of uint64(n), with log2(0) = -1.
-// Rounds down.
-func log2(n int64) int64 {
-	return int64(bits.Len64(uint64(n))) - 1
 }
 
 // logX returns logarithm of n base 2.
